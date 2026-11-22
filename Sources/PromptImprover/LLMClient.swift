@@ -31,7 +31,13 @@ struct LLMClient {
 
     private func request(_ path: String) throws -> URLRequest {
         let base = endpoint.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        guard let url = URL(string: "\(base)/\(path)") else { throw LLMError.badURL(endpoint.baseURL) }
+        guard let url = URL(string: "\(base)/\(path)"), let scheme = url.scheme?.lowercased() else {
+            throw LLMError.badURL(endpoint.baseURL)
+        }
+        let loopback = ["localhost", "127.0.0.1", "::1"].contains(url.host?.lowercased() ?? "")
+        guard scheme == "https" || (scheme == "http" && loopback) else {
+            throw LLMError.api("Refusing to send your API key over \(scheme)://. Use https (plain http is only allowed for localhost).")
+        }
         var req = URLRequest(url: url, timeoutInterval: 600)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         switch endpoint.format {
@@ -44,12 +50,17 @@ struct LLMClient {
         return req
     }
 
+    private func redact(_ s: String) -> String {
+        apiKey.count >= 8 ? s.replacingOccurrences(of: apiKey, with: "••••") : s
+    }
+
     // MARK: Models
 
     func listModels() async throws -> [String] {
-        let (data, resp) = try await URLSession.shared.data(for: try request("models"))
+        let (data, resp) = try await URLSession.shared.data(
+            for: try request(endpoint.format == .anthropic ? "models?limit=1000" : "models"))
         if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw LLMError.http(http.statusCode, String(decoding: data, as: UTF8.self))
+            throw LLMError.http(http.statusCode, redact(String(decoding: data, as: UTF8.self)))
         }
         struct List: Decodable { struct M: Decodable { let id: String }; let data: [M] }
         return try JSONDecoder().decode(List.self, from: data).data.map(\.id).sorted()
@@ -69,11 +80,16 @@ struct LLMClient {
                     if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                         var text = ""
                         for try await line in bytes.lines { text += line; if text.count > 4000 { break } }
-                        throw LLMError.http(http.statusCode, text)
+                        throw LLMError.http(http.statusCode, redact(text))
                     }
 
+                    var sawData = false, stray = ""
                     for try await line in bytes.lines {
-                        guard line.hasPrefix("data:") else { continue }
+                        guard line.hasPrefix("data:") else {
+                            if !line.hasPrefix("event:") && !line.hasPrefix(":") && stray.count < 2000 { stray += line }
+                            continue
+                        }
+                        sawData = true
                         let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                         if payload == "[DONE]" { break }
                         guard let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any]
@@ -82,6 +98,13 @@ struct LLMClient {
                             throw LLMError.api(err["message"] as? String ?? "Unknown API error")
                         }
                         if let chunk = delta(from: obj), !chunk.isEmpty { continuation.yield(chunk) }
+                    }
+                    // Some proxies answer 200 with a plain JSON error and no SSE at all.
+                    if !sawData, !stray.isEmpty {
+                        let obj = try? JSONSerialization.jsonObject(with: Data(stray.utf8)) as? [String: Any]
+                        let msg = (obj?["error"] as? [String: Any])?["message"] as? String
+                            ?? obj?["error"] as? String ?? stray
+                        throw LLMError.api(redact(String(msg.prefix(400))))
                     }
                     continuation.finish()
                 } catch {

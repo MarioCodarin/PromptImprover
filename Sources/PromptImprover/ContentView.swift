@@ -6,7 +6,7 @@ struct PanelView: View {
     @EnvironmentObject var store: EndpointStore
     @EnvironmentObject var vm: ImproverViewModel
 
-    private var missingKey: Bool { store.selected.map { store.apiKey(for: $0) == nil } ?? true }
+    private var missingKey: Bool { store.selected.map { !store.hasKey($0) } ?? true }
     private var hasResult: Bool { !vm.output.isEmpty || vm.phase == .generating }
 
     var body: some View {
@@ -33,7 +33,7 @@ struct PanelView: View {
         .animation(.smooth(duration: 0.25), value: vm.phase)
         .animation(.smooth(duration: 0.25), value: vm.expanded)
         .task {
-            guard !vm.didAutoFetch, let e = store.selected, store.apiKey(for: e) != nil else { return }
+            guard !vm.didAutoFetch, let e = store.selected, store.hasKey(e) else { return }
             vm.didAutoFetch = true
             do { try await store.refreshModels(e) }
             catch { vm.error = "Couldn't load models: \(error.localizedDescription)" }
@@ -47,6 +47,11 @@ private struct Header: View {
     @EnvironmentObject var vm: ImproverViewModel
     @EnvironmentObject var profiles: ProfileStore
     @Environment(\.openSettings) private var openSettings
+    private func showSettings() {
+        // Accessory (menu bar) apps aren't frontmost: open first, then force-activate so Settings isn't hidden.
+        openSettings()
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -58,7 +63,7 @@ private struct Header: View {
                     .help("New prompt")
             }
             Menu {
-                Button("Settings…") { NSApp.activate(); openSettings() }
+                Button("Settings…") { showSettings() }
                     .keyboardShortcut(",")
                 Button("New prompt") { vm.reset() }
                 Divider()
@@ -175,8 +180,8 @@ private struct Composer: View {
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!canSend && !vm.isBusy)
+                .keyboardShortcut(vm.phase == .answering ? nil : KeyboardShortcut(.return, modifiers: .command))
+                .disabled((!canSend && !vm.isBusy) || vm.phase == .answering)
                 .help(vm.isBusy ? "Stop" : "Improve (⌘↩)")
             }
             .controlSize(.small)
@@ -203,7 +208,7 @@ private struct QuestionsCard: View {
             .frame(maxHeight: 300)
 
             HStack {
-                Button("Skip") { vm.generate() }
+                Button("Skip") { vm.skipQuestions() }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
                 Spacer()
                 Button("Write prompt") { vm.generate() }
@@ -342,7 +347,11 @@ private struct ExpandedResult: View {
                 .keyboardShortcut(.escape, modifiers: [])
 
                 Text("Prompt").font(.system(size: 13, weight: .semibold))
-                if vm.phase == .generating { ProgressView().controlSize(.mini) }
+                if vm.phase == .generating {
+                    ProgressView().controlSize(.mini)
+                    Button { vm.cancel() } label: { Image(systemName: "stop.circle") }
+                        .buttonStyle(.borderless).help("Stop")
+                }
                 Spacer()
                 Text("\(vm.output.split(whereSeparator: \.isWhitespace).count) words · ~\(vm.output.count / 4) tok")
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -481,6 +490,11 @@ private struct Thumbs: View {
 
 private struct KeyBanner: View {
     @Environment(\.openSettings) private var openSettings
+    private func showSettings() {
+        // Accessory (menu bar) apps aren't frontmost: open first, then force-activate so Settings isn't hidden.
+        openSettings()
+        NSApp.activate(ignoringOtherApps: true)
+    }
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "key.fill")
@@ -490,7 +504,7 @@ private struct KeyBanner: View {
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.gradient))
             Text("Add your API key to start").font(.system(size: 12, weight: .medium))
             Spacer()
-            Button("Settings") { NSApp.activate(); openSettings() }.controlSize(.small)
+            Button("Settings") { showSettings() }.controlSize(.small)
         }
         .card(padding: 8)
     }
@@ -554,7 +568,7 @@ struct FlowLayout: Layout {
         let maxW = proposal.width ?? .infinity
         var x: CGFloat = 0, y: CGFloat = 0, rowH: CGFloat = 0, widest: CGFloat = 0
         for v in subviews {
-            let s = v.sizeThatFits(.unspecified)
+            let s = v.sizeThatFits(ProposedViewSize(width: maxW.isFinite ? maxW : nil, height: nil))
             if x > 0 && x + s.width > maxW { y += rowH + spacing; x = 0; rowH = 0 }
             x += s.width + spacing
             rowH = max(rowH, s.height)
@@ -566,7 +580,7 @@ struct FlowLayout: Layout {
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         var x = bounds.minX, y = bounds.minY, rowH: CGFloat = 0
         for v in subviews {
-            let s = v.sizeThatFits(.unspecified)
+            let s = v.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
             if x > bounds.minX && x + s.width > bounds.maxX { y += rowH + spacing; x = bounds.minX; rowH = 0 }
             v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
             x += s.width + spacing

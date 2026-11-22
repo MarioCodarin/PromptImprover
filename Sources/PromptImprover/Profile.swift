@@ -89,7 +89,6 @@ final class ProfileStore: ObservableObject {
     func contextBlock() -> String? {
         let p = profile
         var lines: [String] = []
-        if !p.name.isEmpty { lines.append("Name: \(p.name)") }
         if !p.role.isEmpty { lines.append("Role: \(p.role)") }
         lines.append("Expertise in the task domain: \(p.expertise.rawValue)")
         lines.append("Preferred tone of prompts: \(p.tone.rawValue)")

@@ -17,8 +17,8 @@ final class ImproverViewModel: ObservableObject {
     @Published var error: String?
     @Published var copied = false
     @Published var expanded = false
-    var didAutoFetch = false
     @Published var rated: Bool? = nil   // nil = not rated yet for the current output
+    var didAutoFetch = false
 
     private var client: LLMClient?
     private var model = ""
@@ -26,45 +26,63 @@ final class ImproverViewModel: ObservableObject {
     private var history: [ChatMessage] = []
     private var task: Task<Void, Never>?
 
+    /// Bumped on every start/cancel. A task only writes state while its own run is still current,
+    /// so a cancelled stream (which ends quietly, without throwing) can never overwrite newer state.
+    private var runID = 0
+    /// Last good result, restored if a refine fails or is stopped.
+    private var lastGood: (output: String, history: [ChatMessage])?
+
     var isBusy: Bool { phase == .analyzing || phase == .generating }
 
     func start(store: EndpointStore, profile: ProfileStore) {
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard let e = store.selected else { return }
-        guard let key = store.apiKey(for: e) else { error = LLMError.missingKey.errorDescription; return }
+        guard store.hasKey(e), let key = store.apiKey(for: e) else { error = LLMError.missingKey.errorDescription; return }
         guard let m = e.selectedModel ?? e.models.first else { error = "Pick a model first."; return }
 
-        client = LLMClient(endpoint: e, apiKey: key)
+        task?.cancel()
+        runID += 1
+        let client = LLMClient(endpoint: e, apiKey: key)
+        self.client = client
         profileContext = profile.contextBlock()
         model = m
-        error = nil; analysis = ""; questions = []; output = ""; history = []
+        error = nil; analysis = ""; questions = []; output = ""; history = []; lastGood = nil; expanded = false
 
         guard askQuestions else { generate(); return }
 
         phase = .analyzing
+        let run = runID
+        let system = MetaPrompts.personalize(MetaPrompts.analyzer, profile: profileContext)
+        let input = MetaPrompts.analyzerInput(draft, target: target)
         task = Task {
             do {
-                let raw = try await client!.complete(
-                    system: MetaPrompts.personalize(MetaPrompts.analyzer, profile: profileContext),
-                    messages: [.user(MetaPrompts.analyzerInput(draft, target: target))],
-                    model: model)
+                let raw = try await client.complete(system: system, messages: [.user(input)], model: m)
+                guard run == runID, !Task.isCancelled else { return }
                 let (a, qs) = MetaPrompts.parseAnalysis(raw)
                 analysis = a
                 questions = qs
                 if qs.isEmpty { generate() } else { phase = .answering }
-            } catch { fail(error) }
+            } catch { fail(error, run: run) }
         }
     }
 
     func generate() {
         let brief = MetaPrompts.composeBrief(draft: draft, analysis: analysis, questions: questions)
         history = [.user(brief)]
+        lastGood = nil
         runWriter()
+    }
+
+    /// Skip means skip: half-typed answers are not sent.
+    func skipQuestions() {
+        for i in questions.indices { questions[i].answer = "" }
+        generate()
     }
 
     func refine() {
         let instr = refineText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !instr.isEmpty, !output.isEmpty else { return }
+        guard !instr.isEmpty, !output.isEmpty, phase == .done else { return }
+        lastGood = (output, history)
         history += [.assistant(output),
                     .user("Revise the prompt: \(instr)\nReturn the full revised prompt only.")]
         refineText = ""
@@ -73,33 +91,44 @@ final class ImproverViewModel: ObservableObject {
 
     private func runWriter() {
         guard let client else { return }
+        task?.cancel()
+        runID += 1
+        let run = runID
         phase = .generating
         output = ""
         rated = nil
         let system = MetaPrompts.personalize(MetaPrompts.writer(target: target), profile: profileContext)
-        let msgs = history
+        let msgs = history, model = model
         task = Task {
             do {
                 var raw = ""
                 for try await chunk in client.stream(system: system, messages: msgs, model: model) {
+                    guard run == runID else { return }
                     raw += chunk
                     output = MetaPrompts.stripThinking(raw)
                 }
-                output = MetaPrompts.unfence(MetaPrompts.stripThinking(raw))
-                if output.isEmpty { throw LLMError.api("The model returned an empty response.") }
+                guard run == runID, !Task.isCancelled else { return }
+                let final = MetaPrompts.unfence(MetaPrompts.stripThinking(raw))
+                if final.isEmpty { throw LLMError.api("The model returned an empty response.") }
+                output = final
+                lastGood = nil
                 phase = .done
-            } catch { fail(error) }
+            } catch { fail(error, run: run) }
         }
     }
 
     func cancel() {
         task?.cancel()
+        runID += 1
+        restoreAfterInterruptedRefine()
         phase = output.isEmpty ? .idle : .done
+        if output.isEmpty { expanded = false }
     }
 
     func reset() {
         cancel()
-        draft = ""; analysis = ""; questions = []; output = ""; error = nil; phase = .idle; expanded = false
+        draft = ""; analysis = ""; questions = []; output = ""; error = nil
+        phase = .idle; expanded = false; lastGood = nil; history = []
     }
 
     func rate(positive: Bool, tags: [String], profile: ProfileStore) {
@@ -114,9 +143,19 @@ final class ImproverViewModel: ObservableObject {
         Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
     }
 
-    private func fail(_ err: Error) {
+    private func restoreAfterInterruptedRefine() {
+        if let good = lastGood {
+            output = good.output
+            history = good.history
+            lastGood = nil
+        }
+    }
+
+    private func fail(_ err: Error, run: Int) {
+        guard run == runID else { return }
         if err is CancellationError || (err as? URLError)?.code == .cancelled { return }
         error = err.localizedDescription
+        restoreAfterInterruptedRefine()
         phase = output.isEmpty ? .idle : .done
     }
 }

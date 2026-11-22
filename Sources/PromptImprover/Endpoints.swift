@@ -26,6 +26,24 @@ struct Endpoint: Codable, Identifiable, Hashable {
         selectedModel: "glm-5.3-abliterated"
     )
 
+    init(id: UUID = UUID(), name: String, baseURL: String, format: APIFormat = .openAI,
+         models: [String] = [], selectedModel: String? = nil, reasoningEffort: String? = nil) {
+        self.id = id; self.name = name; self.baseURL = baseURL; self.format = format
+        self.models = models; self.selectedModel = selectedModel; self.reasoningEffort = reasoningEffort
+    }
+
+    /// Tolerant decoding: missing or unknown fields fall back to defaults instead of failing the whole list.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Endpoint"
+        baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? ""
+        format = (try? c.decodeIfPresent(APIFormat.self, forKey: .format)) ?? .openAI
+        models = (try? c.decodeIfPresent([String].self, forKey: .models)) ?? []
+        selectedModel = try? c.decodeIfPresent(String.self, forKey: .selectedModel)
+        reasoningEffort = try? c.decodeIfPresent(String.self, forKey: .reasoningEffort)
+    }
+
     static let presets: [Endpoint] = [
         .refuseless,
         Endpoint(name: "OpenAI", baseURL: "https://api.openai.com/v1"),
@@ -39,6 +57,8 @@ struct Endpoint: Codable, Identifiable, Hashable {
 final class EndpointStore: ObservableObject {
     @Published var endpoints: [Endpoint] { didSet { save() } }
     @Published var selectedID: UUID? { didSet { save() } }
+    /// Which endpoints have a key, so views don't hit the Keychain on every render.
+    @Published private(set) var keyed: Set<UUID> = []
 
     private let defaultsKey = "endpoints.v1"
     private let selectedKey = "endpoints.selected.v1"
@@ -52,7 +72,10 @@ final class EndpointStore: ObservableObject {
             endpoints = [.refuseless]
         }
         selectedID = d.string(forKey: selectedKey).flatMap(UUID.init) ?? endpoints.first?.id
+        keyed = Set(endpoints.map(\.id).filter { Keychain.get($0.uuidString) != nil })
     }
+
+    func hasKey(_ e: Endpoint) -> Bool { keyed.contains(e.id) }
 
     var selected: Endpoint? {
         endpoints.first { $0.id == selectedID } ?? endpoints.first
@@ -72,8 +95,9 @@ final class EndpointStore: ObservableObject {
     func remove(_ e: Endpoint) {
         endpoints.removeAll { $0.id == e.id }
         Keychain.delete(e.id.uuidString)
-        if selectedID == e.id { selectedID = endpoints.first?.id }
-        if endpoints.isEmpty { endpoints = [.refuseless]; selectedID = endpoints[0].id }
+        keyed.remove(e.id)
+        if endpoints.isEmpty { _ = add(.refuseless) }   // fresh id, so no stale key can attach to it
+        if selectedID == e.id || !endpoints.contains(where: { $0.id == selectedID }) { selectedID = endpoints.first?.id }
     }
 
     func select(_ e: Endpoint, model: String) {
@@ -100,8 +124,12 @@ final class EndpointStore: ObservableObject {
     func apiKey(for e: Endpoint) -> String? { Keychain.get(e.id.uuidString) }
     func setAPIKey(_ key: String, for e: Endpoint) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { Keychain.delete(e.id.uuidString) } else { Keychain.set(trimmed, for: e.id.uuidString) }
-        objectWillChange.send()
+        guard endpoints.contains(where: { $0.id == e.id }) else { return }   // never resurrect a removed endpoint's key
+        if trimmed.isEmpty {
+            Keychain.delete(e.id.uuidString); keyed.remove(e.id)
+        } else {
+            Keychain.set(trimmed, for: e.id.uuidString); keyed.insert(e.id)
+        }
     }
 
     private func save() {
@@ -122,6 +150,7 @@ enum Keychain {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecValueData as String: Data(value.utf8),
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
         SecItemAdd(q as CFDictionary, nil)
     }

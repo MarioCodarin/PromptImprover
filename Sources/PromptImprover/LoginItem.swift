@@ -30,6 +30,8 @@ final class LoginItem: ObservableObject {
         guard Bundle.main.bundlePath.hasSuffix(".app"),
               !UserDefaults.standard.bool(forKey: key) else { return }
         try? SMAppService.mainApp.register()
-        UserDefaults.standard.set(true, forKey: key)
+        // Only mark done once it actually took, so a failed first attempt is retried next launch.
+        let st = SMAppService.mainApp.status
+        if st == .enabled || st == .requiresApproval { UserDefaults.standard.set(true, forKey: key) }
     }
 }

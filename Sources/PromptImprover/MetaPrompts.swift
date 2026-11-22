@@ -149,9 +149,14 @@ enum MetaPrompts {
 
     // MARK: Helpers
 
-    /// Removes <think>…</think> blocks some reasoning models emit inline (including an unclosed one mid-stream).
+    /// Removes <think>…</think> blocks some reasoning models emit inline: an unclosed one mid-stream, and an
+    /// orphan </think> (chat templates that put the opening tag in the prompt, so only the closing tag comes back).
     static func stripThinking(_ s: String) -> String {
         var out = s
+        if let close = out.range(of: "</think>"),
+           out.range(of: "<think>", range: out.startIndex..<close.lowerBound) == nil {
+            out.removeSubrange(out.startIndex..<close.upperBound)
+        }
         while let start = out.range(of: "<think>") {
             if let end = out.range(of: "</think>", range: start.upperBound..<out.endIndex) {
                 out.removeSubrange(start.lowerBound..<end.upperBound)
@@ -162,31 +167,38 @@ enum MetaPrompts {
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Removes a single code fence wrapping the whole output, if a model added one anyway.
+    /// Removes one code fence wrapping the *whole* output. Only when the first and last lines are the only
+    /// fence lines, so output that starts and ends with separate code blocks is left alone.
     static func unfence(_ s: String) -> String {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard t.hasPrefix("```"), t.hasSuffix("```"), t.count > 6 else { return t }
-        var lines = t.components(separatedBy: "\n")
-        lines.removeFirst()
-        if lines.last?.trimmingCharacters(in: .whitespaces) == "```" { lines.removeLast() }
-        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = t.components(separatedBy: "\n")
+        let fences = lines.indices.filter { lines[$0].trimmingCharacters(in: .whitespaces).hasPrefix("```") }
+        guard lines.count >= 3, fences == [0, lines.count - 1],
+              lines[lines.count - 1].trimmingCharacters(in: .whitespaces) == "```" else { return t }
+        return lines[1..<(lines.count - 1)].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Tolerant JSON extraction: models sometimes wrap JSON in prose or fences.
+    /// Tolerant JSON extraction: models wrap JSON in prose or fences, and one malformed question
+    /// must not throw away the others. If nothing parses, no raw JSON leaks into the diagnosis.
     static func parseAnalysis(_ raw: String) -> (String, [ClarifyingQuestion]) {
         let text = stripThinking(raw)
-        struct Payload: Decodable {
-            struct Q: Decodable { let question: String; let why: String?; let options: [String]? }
-            let analysis: String?
-            let questions: [Q]?
+        guard let a = text.firstIndex(of: "{"), let b = text.lastIndex(of: "}"), a < b,
+              let obj = try? JSONSerialization.jsonObject(with: Data(text[a...b].utf8)) as? [String: Any]
+        else { return ("", []) }
+
+        let analysis = obj["analysis"] as? String ?? ""
+        let qs = (obj["questions"] as? [Any] ?? []).compactMap { item -> ClarifyingQuestion? in
+            guard let q = item as? [String: Any],
+                  let text = (q["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty else { return nil }
+            let options = (q["options"] as? [Any] ?? []).compactMap { opt -> String? in
+                if let s = opt as? String { return s }
+                if let n = opt as? NSNumber { return n.stringValue }
+                return nil
+            }
+            return ClarifyingQuestion(question: text, why: q["why"] as? String ?? "", options: options)
         }
-        guard let a = text.firstIndex(of: "{"), let b = text.lastIndex(of: "}"),
-              let p = try? JSONDecoder().decode(Payload.self, from: Data(text[a...b].utf8))
-        else { return (text, []) }
-        let qs = (p.questions ?? []).prefix(4).map {
-            ClarifyingQuestion(question: $0.question, why: $0.why ?? "", options: $0.options ?? [])
-        }
-        return (p.analysis ?? "", Array(qs))
+        return (analysis, Array(qs.prefix(4)))
     }
 }
 

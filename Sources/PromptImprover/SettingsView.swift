@@ -3,13 +3,14 @@ import SwiftUI
 // Plain ObservableObjects instead of @State: the Command Line Tools SDK lacks the SwiftUI macro plugin.
 final class SettingsUI: ObservableObject { @Published var editingID: UUID? }
 
+/// Only editor-local UI state. The endpoint itself is edited directly in the store (no stale copy).
 final class EditorModel: ObservableObject {
-    @Published var endpoint: Endpoint
+    let id: UUID
     @Published var key = ""
     @Published var reveal = false
     @Published var status: (ok: Bool, text: String)?
     @Published var loading = false
-    init(_ e: Endpoint) { endpoint = e }
+    init(id: UUID) { self.id = id }
 }
 
 struct SettingsView: View {
@@ -71,6 +72,9 @@ private struct GeneralSettings: View {
         }
         .formStyle(.grouped)
         .onAppear { login.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            login.refresh()
+        }
     }
 }
 
@@ -95,7 +99,7 @@ private struct ProfileSettings: View {
                 }
                 .padding(.vertical, 4)
             } footer: {
-                Text("Stays on this Mac. It's added to the instructions so prompts fit you, and questions you've already answered here get skipped.")
+                Text("Saved on this Mac. Everything except your name is sent to your active endpoint with each request, so prompts fit you and the app skips questions this profile already answers.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -236,7 +240,7 @@ private struct EndpointsSettings: View {
             sidebar.frame(width: 200)
             Divider()
             if let e = store.endpoints.first(where: { $0.id == ui.editingID }) {
-                EndpointEditor(model: EditorModel(e)).id(e.id)
+                EndpointEditor(model: EditorModel(id: e.id)).id(e.id)
             } else {
                 Text("Select an endpoint").foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -251,7 +255,7 @@ private struct EndpointsSettings: View {
                 ForEach(store.endpoints) { e in
                     HStack(spacing: 8) {
                         Circle()
-                            .fill(store.apiKey(for: e) == nil ? Color.orange : Color.green)
+                            .fill(store.hasKey(e) ? Color.green : Color.orange)
                             .frame(width: 7, height: 7)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(e.name).font(.system(size: 13))
@@ -294,19 +298,56 @@ private struct EndpointEditor: View {
     @EnvironmentObject var store: EndpointStore
     @StateObject var model: EditorModel
 
+    private var current: Endpoint? { store.endpoints.first { $0.id == model.id } }
+
+    /// Binding straight into the store, so edits are saved immediately and never overwrite newer data.
+    private func field<T>(_ kp: WritableKeyPath<Endpoint, T>, fallback: T) -> Binding<T> {
+        Binding(
+            get: { current?[keyPath: kp] ?? fallback },
+            set: { v in guard var e = current else { return }; e[keyPath: kp] = v; store.update(e) })
+    }
+
+    /// Changing the host drops the stored key, so a key is never sent to a host it wasn't entered for.
+    private var baseURL: Binding<String> {
+        Binding(
+            get: { current?.baseURL ?? "" },
+            set: { v in
+                guard var e = current else { return }
+                let hostChanged = URL(string: e.baseURL)?.host != URL(string: v)?.host
+                e.baseURL = v
+                store.update(e)
+                if hostChanged && store.hasKey(e) {
+                    store.setAPIKey("", for: e)
+                    model.key = ""
+                    model.status = (false, "Host changed, so the key was removed. Enter the key for the new host.")
+                }
+            })
+    }
+
+    private var key: Binding<String> {
+        Binding(get: { model.key }, set: { v in
+            model.key = v
+            if let e = current { store.setAPIKey(v, for: e) }
+        })
+    }
+
     var body: some View {
+        if let e = current { form(e) }
+    }
+
+    private func form(_ e: Endpoint) -> some View {
         Form {
             Section {
                 HStack(spacing: 6) {
                     Group {
                         if model.reveal {
-                            TextField("API key", text: $model.key, prompt: Text("Paste your key"))
+                            TextField("API key", text: key, prompt: Text("Paste your key"))
                         } else {
-                            SecureField("API key", text: $model.key, prompt: Text("Paste your key"))
+                            SecureField("API key", text: key, prompt: Text("Paste your key"))
                         }
                     }
                     .font(.system(.body, design: .monospaced))
-                    .onSubmit { Task { await saveAndTest() } }
+                    .onSubmit { Task { await test() } }
 
                     Button { model.reveal.toggle() } label: {
                         Image(systemName: model.reveal ? "eye.slash" : "eye")
@@ -323,71 +364,63 @@ private struct EndpointEditor: View {
                             .textSelection(.enabled)
                             .lineLimit(2)
                     } else {
-                        Label("Stored in your macOS Keychain", systemImage: "lock.fill")
+                        Label("Saved to your macOS Keychain as you type", systemImage: "lock.fill")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button(model.loading ? "Testing…" : "Save & Test") { Task { await saveAndTest() } }
+                    Button(model.loading ? "Testing…" : "Test & fetch models") { Task { await test() } }
                         .buttonStyle(.borderedProminent)
                         .disabled(model.loading)
                 }
             } header: {
                 Text("API key")
             } footer: {
-                if model.endpoint.baseURL.contains("refuseless") {
+                if e.baseURL.contains("refuseless") {
                     Text("Refuseless keys start with abl_. One key works for both OpenAI and Anthropic formats.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
 
             Section("Connection") {
-                TextField("Name", text: $model.endpoint.name)
-                TextField("Base URL", text: $model.endpoint.baseURL)
+                TextField("Name", text: field(\.name, fallback: ""))
+                TextField("Base URL", text: baseURL)
                     .font(.system(.body, design: .monospaced))
-                Picker("Format", selection: $model.endpoint.format) {
+                Picker("Format", selection: field(\.format, fallback: .openAI)) {
                     ForEach(APIFormat.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
             }
 
             Section("Model") {
-                Picker("Default model", selection: $model.endpoint.selectedModel) {
-                    if model.endpoint.models.isEmpty { Text("Test the key to load models").tag(String?.none) }
-                    ForEach(model.endpoint.models, id: \.self) { Text($0).tag(Optional($0)) }
+                Picker("Default model", selection: field(\.selectedModel, fallback: nil)) {
+                    if e.models.isEmpty { Text("Test the key to load models").tag(String?.none) }
+                    ForEach(e.models, id: \.self) { Text($0).tag(Optional($0)) }
                 }
-                Picker("Reasoning effort", selection: $model.endpoint.reasoningEffort) {
+                Picker("Reasoning effort", selection: field(\.reasoningEffort, fallback: nil)) {
                     Text("Model default").tag(String?.none)
                     ForEach(["off", "low", "high", "max"], id: \.self) { Text($0.capitalized).tag(Optional($0)) }
                 }
-                .disabled(model.endpoint.format == .anthropic)
+                .disabled(e.format == .anthropic)
             }
 
             Section {
-                Button(store.selectedID == model.endpoint.id ? "Active endpoint" : "Use this endpoint") {
-                    save(); store.selectedID = model.endpoint.id
+                Button(store.selectedID == e.id ? "Active endpoint" : "Use this endpoint") {
+                    store.selectedID = e.id
                 }
-                .disabled(store.selectedID == model.endpoint.id)
+                .disabled(store.selectedID == e.id)
             }
         }
         .formStyle(.grouped)
-        .onAppear { model.key = store.apiKey(for: model.endpoint) ?? "" }
-        .onDisappear { save() }
+        .onAppear { model.key = store.apiKey(for: e) ?? "" }
     }
 
-    private func save() {
-        store.update(model.endpoint)
-        store.setAPIKey(model.key, for: model.endpoint)
-    }
-
-    private func saveAndTest() async {
-        save()
-        guard !model.key.trimmingCharacters(in: .whitespaces).isEmpty else {
-            model.status = (false, "Enter an API key first."); return
-        }
+    private func test() async {
+        guard let e = current else { return }
+        guard store.hasKey(e) else { model.status = (false, "Enter an API key first."); return }
         model.loading = true; defer { model.loading = false }
         do {
-            model.endpoint = try await store.refreshModels(model.endpoint)
-            model.status = (true, "Connected · \(model.endpoint.models.count) models")
+            let updated = try await store.refreshModels(e)
+            model.status = (true, "Connected · \(updated.models.count) models")
         } catch {
             model.status = (false, error.localizedDescription)
         }
