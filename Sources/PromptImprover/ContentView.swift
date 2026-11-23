@@ -109,7 +109,7 @@ private struct ModelMenu: View {
             }
         } label: {
             HStack(spacing: 4) {
-                Circle().fill(Color.green).frame(width: 6, height: 6)
+                Circle().fill(statusColor).frame(width: 6, height: 6)
                 Text(store.selected?.selectedModel ?? "Choose model")
                     .foregroundStyle(.secondary)
             }
@@ -117,6 +117,14 @@ private struct ModelMenu: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help(store.selected?.name ?? "")
+    }
+
+    /// The dot is a status light, so it has to have more than one state. It was unconditionally
+    /// green: the panel said "ready" with no key stored and no model picked.
+    private var statusColor: Color {
+        guard let e = store.selected else { return .secondary }
+        guard store.hasKey(e) else { return .orange }
+        return e.selectedModel == nil ? .secondary : .green
     }
 }
 
@@ -441,23 +449,36 @@ private struct ExpandedResult: View {
     }
 }
 
-/// Writes the prompt, and the acceptance tests when there are any, to a markdown file.
+/// Writes the prompt, and the acceptance tests beside it when there are any, to disk.
 private struct SaveButton: View {
     @EnvironmentObject var vm: ImproverViewModel
 
     var body: some View {
-        Button {
-            let panel = NSSavePanel()
-            panel.nameFieldStringValue = "prompt.md"
-            panel.allowedContentTypes = [.plainText]
-            guard panel.runModal() == .OK, let url = panel.url else { return }
-            var doc = vm.output
-            if let suite = vm.evalSuite { doc += "\n\n" + suite.markdown }
-            try? doc.write(to: url, atomically: true, encoding: .utf8)
-        } label: {
+        Button { save() } label: {
             Label("Save", systemImage: "square.and.arrow.down")
         }
         .disabled(vm.output.isEmpty || vm.isBusy)
+    }
+
+    /// Two files, not one. A prompt with a test suite appended cannot be pasted into a system slot,
+    /// which is the only thing most users do with it — `--e2e --out` writes them apart for the same
+    /// reason, and this used to append, so the app and the harness produced different artefacts
+    /// from the same run.
+    private func save() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "prompt.md"
+        panel.allowedContentTypes = [.plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try vm.output.write(to: url, atomically: true, encoding: .utf8)
+            if let suite = vm.evalSuite, !suite.cases.isEmpty {
+                let tests = url.deletingPathExtension().appendingPathExtension("tests.md")
+                try suite.markdown.write(to: tests, atomically: true, encoding: .utf8)
+            }
+        } catch {
+            // A silent failure here is a prompt the user believes is on disk and is not.
+            vm.error = "Could not save: \(error.localizedDescription)"
+        }
     }
 }
 

@@ -11,34 +11,6 @@ struct Finding: Identifiable, Hashable {
 
     var id: String { code + quote }
 
-    /// Resolve a model-supplied axis name to an axis.
-    ///
-    /// Models return "output contract" for `deliverable` and "success criteria" for `criteria`.
-    /// Before this, an unrecognised key silently scored that axis at the generic 2 with no trace,
-    /// so a misnamed axis cost 3-4 points on the 0-100 and nobody could see why.
-    static func match(_ raw: String) -> Axis? {
-        let key = raw.lowercased()
-            .replacingOccurrences(of: " ", with: "_")
-            .replacingOccurrences(of: "-", with: "_")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
-        if let exact = Axis(rawValue: key) { return exact }
-        let aliases: [String: Axis] = [
-            "output_contract": .deliverable, "output_format": .deliverable, "format": .deliverable,
-            "success_criteria": .criteria, "acceptance_criteria": .criteria, "criteria": .criteria,
-            "instruction": .goal, "objective": .goal, "purpose": .goal, "intent": .goal,
-            "background": .context, "situation": .context,
-            "input": .inputs, "materials": .inputs, "resources": .inputs,
-            "scope": .constraints, "boundaries": .constraints, "limits": .constraints,
-            "steps": .procedure, "process": .procedure, "approach": .procedure,
-            "escalation": .autonomy, "confirmation": .autonomy,
-            "verification": .verification, "testing": .verification, "checks": .verification,
-            "contradiction": .consistency, "internal_consistency": .consistency,
-            "concision": .economy, "brevity": .economy, "length": .economy,
-            "edge_cases": .robustness, "failure_handling": .robustness, "errors": .robustness,
-        ]
-        return aliases[key]
-    }
-
     var title: String { Defect.all.first { $0.code == code }?.title ?? "Defect \(code)" }
 }
 
@@ -61,6 +33,26 @@ struct Diagnosis {
     /// ones were assumed rather than judged.
     func missingAxes(for target: PromptTarget) -> [Axis] {
         Axis.applicable(to: target).filter { scores[$0.rawValue] == nil }
+    }
+
+    /// Axes that scored at or below the generic anchor, worst first.
+    ///
+    /// The actionable half of the score. "73/100" tells the reader the prompt is short of the bar
+    /// and nothing about where; the axes that were actually marked down say what to fix, and unlike
+    /// the weighted total they are not an aggregate of twelve noisy judgements. Ordered by score
+    /// then by axis order, so two runs with the same marks name the axes in the same order.
+    func weakestAxes(for target: PromptTarget, limit: Int = 3) -> [Axis] {
+        // Only axes the critic actually marked. An omitted axis defaults to 2, the generic anchor,
+        // so it appeared here as a measurement *and* in `missingAxes` as an assumption — the panel
+        // printed "Scored without: Context, Inputs, Deliverable" and then "Below the bar: Context,
+        // Inputs, Deliverable", presenting a default as a finding.
+        Axis.applicable(to: target)
+            .enumerated()
+            .compactMap { i, axis in scores[axis.rawValue].map { (axis, i, $0.score) } }
+            .filter { $0.2 <= 2 }
+            .sorted { ($0.2, $0.1) < ($1.2, $1.1) }
+            .prefix(limit)
+            .map(\.0)
     }
 
     /// Weighted mean of the anchored scores, as a 0-100. This is a rubric score, not a probability
@@ -109,6 +101,11 @@ struct Critique {
 
     func missingAxes(for target: PromptTarget) -> [Axis] {
         Diagnosis(scores: scores).missingAxes(for: target)
+    }
+
+    /// Axes the critic marked at or below the generic anchor, worst first. See `Diagnosis`.
+    func weakestAxes(for target: PromptTarget, limit: Int = 3) -> [Axis] {
+        Diagnosis(scores: scores).weakestAxes(for: target, limit: limit)
     }
 }
 
@@ -186,6 +183,16 @@ enum Rigor: String, CaseIterable, Identifiable, Codable {
     var verifies: Bool { self != .fast }
     var repairs: Bool { self != .fast }
     var writesTests: Bool { self == .deep }
+
+    /// Case-insensitive, for the command line.
+    ///
+    /// `Rigor(rawValue:)` is exact, and the raw values are capitalised — so `--rigor deep` fell
+    /// back to Fast and reported a one-call run as if it had been a Deep one. Silent, and in the
+    /// direction that hides defects.
+    static func parse(_ s: String) -> Rigor? {
+        let t = s.trimmingCharacters(in: .whitespaces).lowercased()
+        return allCases.first { $0.rawValue.lowercased() == t }
+    }
 }
 
 struct ClarifyingQuestion: Identifiable, Hashable {

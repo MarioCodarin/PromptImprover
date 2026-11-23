@@ -163,12 +163,65 @@ enum PromptLinter {
 
     // MARK: - Helpers
 
-    static func headings(_ lines: [String]) -> [String] {
-        lines.compactMap { line in
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard t.hasPrefix("#") else { return nil }
-            return t.trimmingCharacters(in: CharacterSet(charactersIn: "# ")).lowercased()
+    /// The title of a line that opens a section, or nil for ordinary content.
+    ///
+    /// Two forms count. A `#`-heading is the markdown one. A line wrapped entirely in emphasis —
+    /// `**Objective**` — is a heading in everything but the hash marks, and demanding `##` reported
+    /// five missing sections and a score of 0 on a hand-written prompt that had all five.
+    ///
+    /// Both forms are always accepted. An earlier version accepted emphasis only in documents with
+    /// no `#` heading at all, which meant a document with a title (`# Add a retry budget`) and bold
+    /// sections still scored 0 — the commonest shape a model produces, and the exact case the rule
+    /// exists for. The sub-title problem that motivated the gate is solved in `sectionBody`, where
+    /// it belongs: a section ends at the next heading that names a *different known section*, so a
+    /// bolded `**Quality bar**` inside Success criteria is content rather than a terminator.
+    static func headingTitle(of line: String) -> (title: String, depth: Int)? {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return nil }
+        if t.hasPrefix("#") {
+            let depth = t.prefix(while: { $0 == "#" }).count
+            return (t.trimmingCharacters(in: CharacterSet(charactersIn: "# ")).lowercased(), depth)
         }
+        // A bullet is content, even when the whole bullet is bold.
+        guard !t.hasPrefix("- ") && !t.hasPrefix("* ") && !t.hasPrefix("\u{2022} ") else { return nil }
+        // The title is the leading emphasised span, whether or not the line ends there. Models
+        // routinely write `**Objective** Stop the sender from dropping events.` — title and first
+        // sentence on one line — and accepting only a whole-line emphasis scored that shape 0.
+        let marks = t.hasPrefix("**") ? "**" : t.hasPrefix("__") ? "__"
+            : t.hasPrefix("*") ? "*" : t.hasPrefix("_") ? "_" : nil
+        guard let marks,
+              let close = t.range(of: marks, range: t.index(t.startIndex, offsetBy: marks.count)..<t.endIndex)
+        else { return nil }
+        let title = String(t[t.index(t.startIndex, offsetBy: marks.count)..<close.lowerBound])
+            .trimmingCharacters(in: .whitespaces)
+            .lowercased()
+        guard !title.isEmpty, title.count <= 48,
+              !title.contains("."), !title.contains(","), !title.contains("?") else { return nil }
+        return (title, 1)
+    }
+
+    /// Every keyword that names a section, across every target.
+    ///
+    /// `sectionBody` needs to know whether a heading begins *some* section, not whether it begins
+    /// the one being captured. A title that names no section is a sub-heading and stays inside.
+    static let sectionVocabulary: [String] = {
+        var seen: [String] = []
+        for target in [PromptTarget.agentTask, .systemPrompt, .chat] {
+            for (_, alternatives) in requiredSections(for: target) {
+                for a in alternatives where !seen.contains(a) { seen.append(a) }
+            }
+        }
+        // Sections the skeleton offers that no target strictly requires, so a bolded one still
+        // terminates the section above it instead of being swallowed as content.
+        for extra in ["input", "constraint", "non-goal", "verification", "priorit",
+                      "autonomy", "escalation", "assumption", "default", "decision", "note"] {
+            if !seen.contains(extra) { seen.append(extra) }
+        }
+        return seen
+    }()
+
+    static func headings(_ lines: [String]) -> [String] {
+        lines.compactMap { headingTitle(of: $0)?.title }
     }
 
     /// A labelled line — "Purpose: …", "**Output contract:** …" — carries the same structural
@@ -178,14 +231,24 @@ enum PromptLinter {
     static func labels(_ lines: [String]) -> [String] {
         lines.compactMap { line in
             let t = line.trimmingCharacters(in: .whitespaces)
-                .drop { "*_#>".contains($0) }
+            // A list item is an entry, not a section title — unless it is a labelled one.
+            // "`- Objective: …`" is a real way to write a section list, and rejecting the whole
+            // bullet made every section in that shape invisible.
+            let bulleted = t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("\u{2022} ")
+            let body = bulleted ? t.dropFirst(2).trimmingCharacters(in: .whitespaces) : t
+            let bare = body.drop { "*_#>".contains($0) }
                 .trimmingCharacters(in: .whitespaces)
-            guard let colon = t.firstIndex(of: ":") else { return nil }
-            let label = t[t.startIndex..<colon]
+            guard let colon = bare.firstIndex(of: ":") else { return nil }
+            let label = bare[..<colon]
                 .trimmingCharacters(in: CharacterSet(charactersIn: "*_ "))
                 .lowercased()
             // A label is a short noun phrase, not a clause.
             guard !label.isEmpty, label.count <= 24, !label.contains(",") else { return nil }
+            // A label that denies the section is not evidence of one. `contains` accepts any label
+            // holding a keyword, so "No output format: produce whatever reads best" satisfied the
+            // output contract while saying there is none.
+            let denials = ["no ", "not ", "never ", "without ", "zero ", "n/a"]
+            guard !denials.contains(where: { label.hasPrefix($0) }) else { return nil }
             return label
         }
     }
@@ -193,24 +256,22 @@ enum PromptLinter {
     /// Body of the first section whose heading matches any keyword, up to the next heading.
     static func sectionBody(_ lines: [String], matching keywords: [String]) -> String {
         var capturing = false
-        var captureDepth = 0
         var out: [String] = []
         for line in lines {
             let t = line.trimmingCharacters(in: .whitespaces)
-            if t.hasPrefix("#") {
-                let depth = t.prefix(while: { $0 == "#" }).count
-                let h = t.trimmingCharacters(in: CharacterSet(charactersIn: "# ")).lowercased()
+            if let h = headingTitle(of: line) {
                 if capturing {
-                    // A deeper heading belongs to this section; a same-or-shallower one ends it.
-                    // Stopping at the first subheading reported "## Success criteria / ### Quality"
-                    // as an empty section, and failed prompts that had written the content.
-                    if depth > captureDepth { continue }
+                    // A heading ends the section only when it names a *different* section. Ending
+                    // at the next heading of any kind made a bolded sub-title inside a section —
+                    // `**Quality bar**` above the criteria — empty the body, which silently
+                    // switched off every check that reads it. A title that names no section is a
+                    // sub-heading and belongs to the section above it.
+                    let namesThis = keywords.contains { h.title.contains($0) }
+                    let namesOther = sectionVocabulary.contains { h.title.contains($0) }
+                    if namesThis || !namesOther { continue }
                     break
                 }
-                if keywords.contains(where: { h.contains($0) }) {
-                    capturing = true
-                    captureDepth = depth
-                }
+                if keywords.contains(where: { h.title.contains($0) }) { capturing = true }
                 continue
             }
             if capturing { out.append(t) }
@@ -251,6 +312,14 @@ enum PromptLinter {
         switch target {
         case .agentTask: return (60, 1400)
         case .systemPrompt: return (50, 1100)
+        // A chat turn is one sentence by nature: "Summarise the attached report in three bullets,
+        // plain prose, no preamble" is complete at eleven words. The floor was 30, which flagged
+        // most casual chat messages. A contentless one is still caught — by the output-contract
+        // check, which is the sound test for "this constrains nothing".
+        // 30, not 8. The floor was lowered to admit a terse but complete chat request, and it
+        // also admitted "Can you help me with this thing, under 100 words please?" — contentless,
+        // and it clears the output-contract check on the word "words" alone, so nothing else
+        // catches it. A chat message that says less than this is genuinely missing something.
         case .chat: return (30, 500)
         }
     }

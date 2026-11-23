@@ -95,7 +95,7 @@ final class EndpointStore: ObservableObject {
     func remove(_ e: Endpoint) {
         endpoints.removeAll { $0.id == e.id }
         Keychain.delete(e.id.uuidString)
-        keyed.remove(e.id)
+        setKeyed(e.id, false)
         if endpoints.isEmpty { _ = add(.refuseless) }   // fresh id, so no stale key can attach to it
         if selectedID == e.id || !endpoints.contains(where: { $0.id == selectedID }) { selectedID = endpoints.first?.id }
     }
@@ -122,14 +122,33 @@ final class EndpointStore: ObservableObject {
     }
 
     func apiKey(for e: Endpoint) -> String? { Keychain.get(e.id.uuidString) }
-    func setAPIKey(_ key: String, for e: Endpoint) {
+
+    /// Stores or clears the key. Returns whether the Keychain now holds what was asked for.
+    ///
+    /// The caller marks the endpoint keyed from this result. It used to insert into `keyed`
+    /// unconditionally, so a Keychain refusal left the UI claiming a key that no request could
+    /// read, and the failure surfaced much later as "add your API key" on a screen that said one
+    /// was saved.
+    @discardableResult
+    func setAPIKey(_ key: String, for e: Endpoint) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard endpoints.contains(where: { $0.id == e.id }) else { return }   // never resurrect a removed endpoint's key
+        guard endpoints.contains(where: { $0.id == e.id }) else { return false }   // never resurrect a removed endpoint's key
         if trimmed.isEmpty {
-            Keychain.delete(e.id.uuidString); keyed.remove(e.id)
-        } else {
-            Keychain.set(trimmed, for: e.id.uuidString); keyed.insert(e.id)
+            Keychain.delete(e.id.uuidString)
+            setKeyed(e.id, false)
+            return true
         }
+        guard Keychain.set(trimmed, for: e.id.uuidString) else { return false }
+        setKeyed(e.id, true)
+        return true
+    }
+
+    /// Publishes only when membership actually changes. The key field commits on every keystroke,
+    /// and a no-op `insert` still fires `objectWillChange` for the whole store — forty characters
+    /// of typing used to invalidate every view observing it forty times.
+    private func setKeyed(_ id: UUID, _ present: Bool) {
+        if present, !keyed.contains(id) { keyed.insert(id) }
+        if !present, keyed.contains(id) { keyed.remove(id) }
     }
 
     private func save() {
@@ -143,7 +162,12 @@ final class EndpointStore: ObservableObject {
 enum Keychain {
     private static let service = "local.PromptImprover.apikeys"
 
-    static func set(_ value: String, for account: String) {
+    /// Writes the key. Returns whether the Keychain accepted it.
+    ///
+    /// The `SecItemAdd` status used to be discarded, so a refused write was indistinguishable
+    /// from a stored one and the UI showed "saved" for a key no request could read.
+    @discardableResult
+    static func set(_ value: String, for account: String) -> Bool {
         delete(account)
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -152,7 +176,7 @@ enum Keychain {
             kSecValueData as String: Data(value.utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
-        SecItemAdd(q as CFDictionary, nil)
+        return SecItemAdd(q as CFDictionary, nil) == errSecSuccess
     }
 
     static func get(_ account: String) -> String? {

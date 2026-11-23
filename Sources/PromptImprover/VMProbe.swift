@@ -9,15 +9,10 @@ import Foundation
 /// invariants that only exist there.
 enum VMProbe {
 
-    enum Case: String, CaseIterable {
-        case restore = "restore"
-        case cancel = "cancel"
-        case rigor = "rigor"
-    }
-
     static func parse(_ args: [String]) -> (base: String, key: String, model: String, rigor: Rigor)? {
         var base = "", key = "k", model = "mock"
         var rigor = Rigor.fast
+        var badRigor = false
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -28,12 +23,22 @@ enum VMProbe {
             case "--model":
                 if i + 1 < args.count { model = args[i + 1]; i += 1 }
             case "--rigor":
-                if i + 1 < args.count { rigor = Rigor(rawValue: args[i + 1]) ?? .fast; i += 1 }
+                if i + 1 < args.count {
+                    // `?? .fast` here meant a lower-case or mistyped depth ran a one-call pipeline
+                    // and the probe then asserted against it. An unrecognised value is now an
+                    // error: it must not silently buy the cheap pipeline.
+                    guard let r = Rigor.parse(args[i + 1]) else {
+                        FileHandle.standardError.write(Data(
+                            "unknown rigor \(args[i + 1]) — use one of: \(Rigor.allCases.map(\.rawValue).joined(separator: ", "))\n".utf8))
+                        badRigor = true; i += 1; continue
+                    }
+                    rigor = r; i += 1
+                }
             default: break
             }
             i += 1
         }
-        guard !base.isEmpty else { return nil }
+        guard !base.isEmpty, !badRigor else { return nil }
         return (base, key, model, rigor)
     }
 
@@ -52,6 +57,9 @@ enum VMProbe {
         // ---- 1. A completed run, then a refine that dies: the prompt must survive. ----------
         let vm = ImproverViewModel()
         vm.draft = "make me a landing page for a coffee subscription"
+        // There is no user here, so stage 1 must not park the run in `.answering`. Without this
+        // a Standard run waits for an answer that never comes and every assertion times out.
+        vm.askQuestions = false
         vm.rigor = rigor
         vm.begin(client: client, model: model, profile: nil)
         let done = await settle(vm, until: { $0.phase == .done || $0.error != nil }, timeout: 40)
@@ -78,6 +86,9 @@ enum VMProbe {
         // ---- 2. Cancel mid-write must not ship a fragment as a finished prompt. ------------
         let vm2 = ImproverViewModel()
         vm2.draft = "make me a landing page for a coffee subscription"
+        // There is no user here, so stage 1 must not park the run in `.answering`. Without this
+        // a Standard run waits for an answer that never comes and every assertion times out.
+        vm2.askQuestions = false
         vm2.rigor = .fast
         vm2.begin(client: client, model: model, profile: nil)
         // Let a little text arrive, then stop. A poisoned client fails before the first byte, so
@@ -92,12 +103,92 @@ enum VMProbe {
                   "\(vm2.output.count) chars, lint \(vm2.lint == nil ? "nil" : "set")")
         }
 
-        // ---- 3. The depth is fixed when the run starts. ------------------------------------
+        // ---- 3. Cancelling a verify must not throw away a finished prompt. ----------------
+        //
+        // `verifying` and `testing` run *after* the text is final and linted, but `lastGood` was
+        // only ever populated by refine and repair — so Stop during "Checking it against the
+        // rubric…" ran `if !restored { output = "" }` and blanked a complete result. A button
+        // labelled Stop deleted the work the user was waiting for.
+        //
+        // Driven against `/slow/`, because a loopback mock answers a verify in under a
+        // millisecond and the phase is never observable.
+        let slowClient = LLMClient(endpoint: Endpoint(name: "slow", baseURL: Self.mode("slow", of: base),
+                                                      format: .openAI, models: [model],
+                                                      selectedModel: model),
+                                   apiKey: key)
+        let vm4 = ImproverViewModel()
+        vm4.draft = "make me a landing page for a coffee subscription"
+        // There is no user here, so stage 1 must not park the run in `.answering`. Without this
+        // a Standard run waits for an answer that never comes and every assertion times out.
+        vm4.askQuestions = false
+        vm4.rigor = .standard
+        vm4.begin(client: slowClient, model: model, profile: nil)
+        let reachedVerify = await settle(vm4, until: { $0.phase == .verifying || $0.error != nil },
+                                         timeout: 40)
+        let finalText = vm4.output
+        let finalLint = vm4.lint
+        if reachedVerify, vm4.error == nil, !finalText.isEmpty {
+            vm4.cancel()
+            _ = await settle(vm4, until: { !$0.isBusy }, timeout: 5)
+            check("stopping a verify keeps the finished prompt", vm4.output == finalText,
+                  "output is \(vm4.output.count) chars, expected \(finalText.count)")
+            check("stopping a verify keeps its structure score", vm4.lint?.score == finalLint?.score,
+                  "lint \(vm4.lint.map { "\($0.score)" } ?? "nil")")
+            check("stopping a verify leaves a copyable result", !vm4.output.isEmpty)
+            // Two calls that demonstrably cost tokens were reported as free, because `finish` is
+            // the only other writer of these and cancel never ran it.
+            check("stopping a verify still reports what it spent",
+                  vm4.elapsed > 0 && vm4.tokensIn > 0,
+                  "\(vm4.elapsed)s, \(vm4.tokensIn) in")
+        } else {
+            check("a Standard run reaches .verifying", false, vm4.error ?? "timed out")
+        }
+
+        // ---- 3b. Stopping a *re-verify* must drop the verdict it never replaced. ------------
+        //
+        // `reverify` already knows there is no score for what is on screen when the re-check is
+        // lost, but `cancel` did not apply the same rule: the critique in hand scores the
+        // pre-repair text, and the panel rendered "Rubric 20/100 — Below the bar …" plus "One
+        // repair pass was applied. What is listed above survived it." over a prompt that had just
+        // re-scored 94/100. Asserted separately because the phase is the same as a first verify.
+        let vm5 = ImproverViewModel()
+        vm5.draft = "make me a landing page for a coffee subscription"
+        vm5.askQuestions = false
+        vm5.rigor = .standard
+        vm5.begin(client: LLMClient(endpoint: Endpoint(name: "slow2",
+                                                       baseURL: Self.mode("slow", of: base),
+                                                       format: .openAI, models: [model],
+                                                       selectedModel: model),
+                                    apiKey: key),
+                  model: model, profile: nil)
+        // Wait for the re-check: a repair has been applied and the phase is verifying again.
+        let reachedReverify = await settle(
+            vm5,
+            until: { $0.phase == .verifying && $0.repairOutcome == .applied || $0.error != nil },
+            timeout: 60)
+        if reachedReverify, vm5.error == nil {
+            vm5.cancel()
+            _ = await settle(vm5, until: { !$0.isBusy }, timeout: 5)
+            check("stopping a re-verify drops the pre-repair verdict", vm5.critique == nil,
+                  "critique still \(vm5.critique == nil ? "nil" : "set")")
+            check("stopping a re-verify stops claiming an outcome",
+                  vm5.repairOutcome == .none && vm5.repairNote == nil,
+                  "outcome \(vm5.repairOutcome)")
+            check("stopping a re-verify keeps the repaired text", !vm5.output.isEmpty,
+                  "\(vm5.output.count) chars")
+        } else {
+            check("a repair reaches a re-verify", false, vm5.error ?? "timed out")
+        }
+
+        // ---- 4. The depth is fixed when the run starts. ------------------------------------
         // A fresh client: the one above is poisoned, and a dead transport would fail this run for
         // a reason that has nothing to do with what is being tested.
         let liveClient = LLMClient(endpoint: endpoint, apiKey: key)
         let vm3 = ImproverViewModel()
         vm3.draft = "make me a landing page for a coffee subscription"
+        // There is no user here, so stage 1 must not park the run in `.answering`. Without this
+        // a Standard run waits for an answer that never comes and every assertion times out.
+        vm3.askQuestions = false
         vm3.rigor = .fast
         vm3.begin(client: liveClient, model: model, profile: nil)
         vm3.rigor = .deep           // flipped mid-flight, as the menu allows
@@ -106,7 +197,15 @@ enum VMProbe {
               ran && vm3.calls == 1, "\(vm3.calls) calls, expected 1 for Fast")
 
         print(failures == 0 ? "vm probe: all green" : "vm probe: \(failures) failing")
-        return failures == 0 ? 0 : 1
+        return failures == 0 ? 0 : 1    }
+
+    /// Rewrites a mock base URL to select one of its failure modes.
+    ///
+    /// The mock reads the mode from the *first* path segment, so it goes before the version:
+    /// `http://host/v1` becomes `http://host/slow/v1`, not `http://host/v1/slow`.
+    static func mode(_ mode: String, of base: String) -> String {
+        guard let r = base.range(of: "/v1", options: .backwards) else { return base }
+        return base.replacingCharacters(in: r, with: "/\(mode)/v1")
     }
 
     /// Polls the view model until `stop` holds. The pipeline is driven by real Tasks, so there is

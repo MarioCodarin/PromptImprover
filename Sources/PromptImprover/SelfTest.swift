@@ -36,6 +36,55 @@ enum SelfTest {
         check("rubric: every axis has all three anchors",
               Axis.allCases.allSatisfy { !$0.anchor4.isEmpty && !$0.anchor2.isEmpty && !$0.anchor0.isEmpty })
 
+        // A score says how far the prompt is from the bar; the weakest axes say where. Ordered by
+        // score then axis order, so the same marks always name the same axes in the same order.
+        // `rest` fills the axes the test does not care about: an axis left out of the dict scores
+        // the generic 2, so a half-built fixture would test the default rather than the rule.
+        func scored(_ marks: [Axis: Int], rest: Int = 4) -> Diagnosis {
+            var all = Dictionary(uniqueKeysWithValues: Axis.allCases.map {
+                ($0.rawValue, AxisVerdict(score: rest, note: ""))
+            })
+            for (axis, score) in marks { all[axis.rawValue] = AxisVerdict(score: score, note: "") }
+            return Diagnosis(scores: all)
+        }
+        let tied = scored([.deliverable: 0, .consistency: 1, .criteria: 2, .inputs: 2])
+            .weakestAxes(for: .agentTask, limit: 4)
+        check("rubric: weakest axes are the marked-down ones, worst first",
+              tied == [.deliverable, .consistency, .inputs, .criteria],
+              "got \(tied.map(\.rawValue))")
+        check("rubric: ties keep axis order",
+              scored([.goal: 2, .economy: 2]).weakestAxes(for: .agentTask) == [.goal, .economy],
+              "got \(scored([.goal: 2, .economy: 2]).weakestAxes(for: .agentTask).map(\.rawValue))")
+        // An omitted axis is an assumption, not a measurement. It was listed under both headings:
+        // "Scored without: Context, Inputs, Deliverable" then "Below the bar: Context, Inputs,
+        // Deliverable" — the second presenting the generic default as a mark the critic made.
+        let partial = scored([.goal: 1])
+        check("rubric: an unscored axis is not also named as weak",
+              !partial.weakestAxes(for: .agentTask).contains(.context),
+              "got \(partial.weakestAxes(for: .agentTask).map(\.rawValue))")
+        check("rubric: a scored weak axis is still named",
+              partial.weakestAxes(for: .agentTask) == [.goal],
+              "got \(partial.weakestAxes(for: .agentTask).map(\.rawValue))")
+
+        check("rubric: nothing below the bar names nothing",
+              scored([:]).weakestAxes(for: .agentTask).isEmpty,
+              "got \(scored([:]).weakestAxes(for: .agentTask).map(\.rawValue))")
+        check("rubric: an axis the critic omitted is counted as generic, not as good",
+              scored([.goal: 4], rest: 2).weakestAxes(for: .chat).first == .context,
+              "got \(scored([.goal: 4], rest: 2).weakestAxes(for: .chat).map(\.rawValue))")
+
+        // The critic's spread is measured, not assumed: 90, 80, 84 and 73 on identical text. A
+        // comparison inside it is the instrument moving, so it is reported as no change rather
+        // than as a small win or a small regression.
+        check("rubric: a 17-point gap is inside the measured spread",
+              RubricNoise.delta(from: 90, to: 73) == .withinNoise)
+        check("rubric: 18 points is a real change",
+              RubricNoise.delta(from: 90, to: 72) == .worse(-18))
+        check("rubric: a real gain is named as a gain",
+              RubricNoise.delta(from: 70, to: 95) == .better(25))
+        check("rubric: a one-point move is not a finding",
+              RubricNoise.delta(from: 80, to: 81) == .withinNoise)
+
         // MARK: Tolerant JSON
 
         let fenced = """
@@ -55,6 +104,45 @@ enum SelfTest {
         check("json: trailing object ignored", chattyObj?["x"] == nil)
 
         check("json: no object returns nil", ResponseParsing.jsonObject(from: "no json here") == nil)
+
+        // The extractor committed to the first `{` in the text. One brace pair in prose — a
+        // placeholder, a shape sketch, an example object before the answer — consumed the single
+        // attempt, and every consumer then degraded silently: the diagnosis came back all-default,
+        // so the writer ran blind with no findings and no questions.
+        let braceFirst = #"Here is the shape: {format, length}. Now: {"brief":"b","findings":[]}"#
+        check("json: a brace pair in prose does not consume the attempt",
+              ResponseParsing.jsonObject(from: braceFirst)?["brief"] as? String == "b",
+              String(describing: ResponseParsing.jsonObject(from: braceFirst)))
+        check("json: a placeholder before the answer is skipped",
+              ResponseParsing.parseDiagnosis(#"Filling {{name}} and {x}. {"brief":"real","risk":"high"}"#).brief == "real")
+        check("json: a trailing comma before a closing brace is tolerated",
+              ResponseParsing.jsonObject(from: #"{"a":1,"b":[1,2,],}"#)?["a"] as? Int == 1)
+        check("json: a trailing comma inside a string is left alone",
+              ResponseParsing.jsonObject(from: #"{"a":"x,}y"}"#)?["a"] as? String == "x,}y")
+        check("json: a truncated object returns nil rather than a partial",
+              ResponseParsing.jsonObject(from: #"{"a":1, "b": {"c":2}"#) == nil)
+
+        // A stray brace in prose used to latch the depth counter and kill every later candidate.
+        // One unmatched `}` drove it to -1, after which no opener was ever offered; one unmatched
+        // `{` left it at 1, so the real object closed to 1 and never to 0. Either way the diagnosis
+        // silently degraded to all-defaults and the writer ran with no findings and no questions.
+        check("json: a stray closer before the answer does not latch the scanner",
+              ResponseParsing.jsonObject(from: "Here } is the analysis:\n{\"a\":1}")?["a"] as? Int == 1)
+        check("json: a stray closer mid-prose does not latch the scanner",
+              ResponseParsing.jsonObject(from: "Clamp it to 0 } and retry.\n{\"a\":1}")?["a"] as? Int == 1)
+        check("json: two stray closers do not latch the scanner",
+              ResponseParsing.jsonObject(from: "}} before the object\n{\"a\":1}")?["a"] as? Int == 1)
+        check("json: a stray closer in a fence does not latch the scanner",
+              ResponseParsing.jsonObject(from: "```\n} oops\n```\n{\"a\":1}")?["a"] as? Int == 1)
+
+        // The taxonomy is keyed on upper-case codes. A lower-case code was labelled minor in the
+        // list while the title reported a blocker — one finding, two severities.
+        let lowerCode = ResponseParsing.parseDiagnosis(#"{"findings":[{"code":"d07","quote":"x","fix":"y"}]}"#)
+        check("parse: a lower-case defect code still resolves its severity",
+              lowerCode.findings.first?.severity == Defect.severity(for: "D07"),
+              String(describing: lowerCode.findings.first?.severity))
+        check("parse: the code is normalised",
+              lowerCode.findings.first?.code == "D07")
 
         // MARK: Parsers
 
@@ -374,6 +462,20 @@ enum SelfTest {
         check("repair guard: a clean gate and a shipping critic trigger nothing",
               RepairGuard.issues(critique: ship, lint: clean).isEmpty)
 
+        // An unparseable critic reply must not switch the gate off. Both callers used to drop the
+        // whole repair decision when the critique failed to parse, so one stray brace in the
+        // critic's prose disabled the deterministic half of the gate — the half that exists
+        // precisely because the critic cannot be trusted. An empty critique says nothing, which
+        // leaves the gate's blockers and majors as the only issues.
+        check("repair guard: an unparseable critique still lets the gate through",
+              RepairGuard.issues(critique: Critique(), lint: majorAfter).count == 1)
+        check("repair guard: an unparseable critique with a clean gate repairs nothing",
+              RepairGuard.issues(critique: Critique(), lint: clean).isEmpty)
+        check("repair guard: an unparseable critique does not veto a blocker",
+              RepairGuard.issues(critique: Critique(), lint: blockerAfter).contains {
+                  $0.severity == .blocker
+              })
+
         // A clean prompt must not be sent to repair over polish. There is nothing to aim at, so the
         // model rewrites for the sake of rewriting: a live run took 100/100 and returned 97/100,
         // accepted because minors never veto.
@@ -524,12 +626,465 @@ enum SelfTest {
         let r7 = PromptLinter.lint(thin, target: .agentTask, unansweredQuestions: 0)
         check("linter: thin prompt is too short", r7.issues.contains { $0.id == "too-short" })
 
+        // MARK: Linter — false positives that were shipping
+        //
+        // Every case below is a *correct* prompt that the gate failed. This is the expensive kind
+        // of bug in a gate: it spends a repair call and tells the operator a good prompt is
+        // broken, which is how a gate stops being read. Each line is a real repro that fired.
+        func notFlagged(_ label: String, _ id: String, _ text: String,
+                        _ target: PromptTarget = .agentTask, unanswered: Int = 0) {
+            let r = PromptLinter.lint(text, target: target, unansweredQuestions: unanswered)
+            check("linter: \(label)", !r.issues.contains { $0.id == id },
+                  r.issues.map(\.id).joined(separator: ","))
+        }
+        func flagged(_ label: String, _ id: String, _ text: String, _ target: PromptTarget = .agentTask) {
+            let r = PromptLinter.lint(text, target: target, unansweredQuestions: 0)
+            check("linter: \(label)", r.issues.contains { $0.id == id },
+                  r.issues.map(\.id).joined(separator: ","))
+        }
+
+        // A pasted artefact is the subject of the request, not a handover of the answer. The
+        // handover test scanned the whole message, so every chat prompt quoting an error, a diff
+        // or a contract text was called "the result, not a prompt".
+        let pastedError = """
+        Here is the error our checkout page throws on Safari:
+
+        TypeError: undefined is not an object (evaluating 'cart.items.map')
+
+        Fix the cause and tell me in two sentences what was wrong. Plain prose, under 100 words, \
+        no preamble and no sign-off.
+        """
+        notFlagged("a pasted error is the subject, not the answer", "executed", pastedError, .chat)
+        notFlagged("a pasted draft to rewrite is not meta", "meta",
+                   "I've written a first draft of the customer reply below. Rewrite it in a plainer "
+                   + "voice, same facts, under 120 words, plain prose, no sign-off.", .chat)
+        notFlagged("a pasted draft is not a handover", "executed",
+                   "I've written a first draft of the customer reply below. Rewrite it in a plainer "
+                   + "voice, same facts, under 120 words, plain prose, no sign-off.", .chat)
+        // The positive control: a real handover still fails.
+        flagged("a genuine handover is still caught", "executed",
+                "Here's your rewritten reply: Dear customer, we have reviewed your case and the "
+                + "refund is on its way. Hope this helps. Let me know if you have questions.", .chat)
+
+        // A prompt that quotes a banned phrase in order to forbid it is not using it.
+        let forbidding = syntheticPrompt(.systemPrompt) + """
+        Never open with "As an AI language model I cannot" — you are the support assistant and you \
+        can look at the account.
+        """
+        notFlagged("a quoted phrase the prompt forbids is not meta", "meta", forbidding, .systemPrompt)
+        notFlagged("a quoted phrase the prompt forbids is not filler", "filler", forbidding, .systemPrompt)
+
+        // A chat turn is short by nature, but not contentless. The floor is 30 words, which is
+        // about one substantive sentence plus its constraints; below that the message is missing
+        // something, and a lower floor let "Can you help me with this thing, under 100 words
+        // please?" through the whole gate on the word "words" alone.
+        notFlagged("a complete chat message is not too thin", "too-short",
+                   "Summarise the attached incident report in three bullets, plain prose, under 150 "
+                   + "words, no preamble and no sign-off. Quote the report for every claim you make, "
+                   + "and say the cause is unstated if the report does not give one.", .chat)
+        flagged("a contentless chat message is still too thin", "too-short",
+                "Can you help me with this thing, under 100 words please?", .chat)
+
+        // Bold pseudo-headings are headings. Demanding `##` reported five missing sections and a
+        // score of 0 on a prompt that had all five.
+        let bold = """
+        **Objective**
+        Stop the nightly export from timing out on tenants with more than 50k rows.
+
+        **Context**
+        The export job hits a 30 second statement timeout. Two tenants complained last week.
+
+        **Requirements**
+        - Stream rows in batches of 5,000 instead of loading the whole table.
+
+        **Output contract**
+        One pull request, English, under 200 words.
+
+        **Success criteria**
+        - The 50k-row tenant fixture finishes in under 30 seconds.
+        """
+        let boldReport = PromptLinter.lint(bold, target: .agentTask, unansweredQuestions: 0)
+        check("linter: a bolded section title is a section", boldReport.isClean,
+              boldReport.issues.map(\.id).joined(separator: ","))
+
+        // The other direction: a document that uses `##` is using bold for emphasis, so a bolded
+        // sentence inside a section must not be read as the next title. Reading it as one ended
+        // the section body early and made the entries below it invisible.
+        // Written out rather than patched onto the synthetic prompt: the fixture has to isolate the
+        // one property under test. The bold line carries no "I chose" either, because that phrase
+        // is the inline-assumption escape and would satisfy the check for the wrong reason.
+        let boldInside = """
+        ## Objective
+        Stop the nightly export from timing out on tenants with more than 50k rows.
+
+        ## Context
+        The export job hits a 30 second statement timeout on the largest tenant.
+
+        ## Requirements
+        - Stream rows in batches instead of loading the whole table.
+
+        ## Assumptions
+        **Two week window with no customer impact**
+        - Two-week window, no customer impact claimed.
+        - No deadline was named in the request.
+
+        ## Output contract
+        One pull request, English, under 200 words.
+
+        ## Success criteria
+        - The 50k-row tenant fixture finishes in under 30 seconds.
+        """
+        let boldInsideReport = PromptLinter.lint(boldInside, target: .agentTask, unansweredQuestions: 2)
+        check("linter: bold emphasis inside a markdown section is not a title",
+              !boldInsideReport.issues.contains { $0.id == "silent-defaults" },
+              boldInsideReport.issues.map(\.id).joined(separator: ","))
+
+        // A labelled line has to match the way headings match. `hasPrefix` made "Definition of
+        // done:" — a phrase this very table lists as a criteria keyword — unreachable.
+        notFlagged("a qualified label still names its section", "missing-success criteria",
+                   syntheticPrompt(.agentTask) + "\nDefinition of done: every test in the package "
+                   + "passes and the diff stays under 300 lines.\n")
+
+        // The decline escape only worked when it was not needed: it read the body of a heading
+        // that had already matched. A decline has to be readable on its own line.
+        notFlagged("an explicit decline on its own line counts", "missing-context",
+                   "No context needed: the module list is in the repository and the task is "
+                   + "self-contained.\n" + syntheticPrompt(.agentTask)
+                       .replacingOccurrences(of: "## Context", with: "## Notes"))
+
+        // Prose criteria with no command in them are still checkable by a second person.
+        notFlagged("prose criteria are checkable", "vague-criteria",
+                   syntheticPrompt(.agentTask) + "\nEvery screen names the next action in its heading.\n")
+
+        // A conditional second format is the sanctioned resolution, not a conflict.
+        notFlagged("a conditional second format is not a conflict", "format-conflict",
+                   syntheticPrompt(.systemPrompt) + "\nIf the customer asks for the line items, "
+                   + "return them as CSV so they can paste them into a spreadsheet.\n", .systemPrompt)
+        // An input format named beside an output verb is not a second deliverable.
+        notFlagged("an input format is not a second deliverable", "format-conflict",
+                   syntheticPrompt(.agentTask) + "\nRead the schema in JSON and write the migration "
+                   + "that adds the export table.\n")
+
+        // Two artefacts, two budgets, no contradiction.
+        notFlagged("a budget per artefact is not a conflict", "limit-conflict-words",
+                   syntheticPrompt(.agentTask) + "\nTwo files: the user guide needs at least 800 "
+                   + "words, and the release note stays under 200 words.\n")
+
+        // The heading path accepts "defaults" and "decisions"; the prose path accepted only
+        // "assumption", so a message that recorded its decisions was told it had recorded none.
+        notFlagged("a recorded default answers the question", "silent-defaults",
+                   syntheticPrompt(.chat) + " Defaults: two-week remediation window, no customer "
+                   + "impact claimed.", .chat, unanswered: 2)
+        notFlagged("a bulleted assumption list is read", "silent-defaults",
+                   syntheticPrompt(.chat) + "\nAssumptions:\n\u{2022} two-week remediation window\n"
+                   + "\u{2022} no customer impact claimed", .chat, unanswered: 2)
+
+        // Domain acronyms and identifiers are not shouting. Two adjacent acronyms used to be a
+        // "run", and `_` split an identifier into one.
+        notFlagged("two acronyms are not shouting", "shouting",
+                   syntheticPrompt(.agentTask) + "\nThe DNS TTL is 300 seconds, so plan for a slow failover.\n")
+        notFlagged("an env var name is not shouting", "shouting",
+                   syntheticPrompt(.agentTask) + "\nSet STRIPE_SECRET_KEY before running the suite.\n")
+        notFlagged("a table header is not shouting", "shouting",
+                   syntheticPrompt(.agentTask) + "\n| SOURCE | TARGET |\n| --- | --- |\n")
+
+        // A prefix is not a word. "Surefire" is a Maven plugin and "Greater" opens a comparison.
+        notFlagged("a word that starts like an opener is not one", "preamble",
+                   "Surefire reports are flaky under parallel builds.\n" + syntheticPrompt(.agentTask))
+        notFlagged("a comparison is not a preamble", "preamble",
+                   "Greater than three retries on a 4xx is a bug.\n" + syntheticPrompt(.agentTask))
+
+        // Every one of these fields is required by the deliverable, in a ~110-word letter.
+        notFlagged("a template's required fields are not filler", "placeholders",
+                   syntheticPrompt(.agentTask) + """
+                   - Address it to {{CLIENT NAME}} at {{CLIENT ADDRESS}}.
+                   - Name {{ACCOUNT MANAGER}} as the contact.
+                   - State the term start {{START DATE}} and the term end {{END DATE}}.
+                   - Quote the annual fee {{ANNUAL FEE}} and the uplift {{UPLIFT PERCENT}}.
+                   """)
+
+        // The product can be the subject matter the deliverable must carry.
+        notFlagged("the product's own adjective is not filler", "filler",
+                   syntheticPrompt(.agentTask) + "\nAnnounce the cutting-edge imaging sensor to the "
+                   + "existing customer list.\n")
+        // The positive control: persona theatre still fails.
+        flagged("persona theatre is still filler", "filler",
+                syntheticPrompt(.agentTask) + "\nYou are an expert world-class copywriter.\n")
+
+        // Pasted source is not restatement.
+        let pastedLong = syntheticPrompt(.chat) + "\n\n```\n"
+            + Array(repeating: "the report states a cause that the evidence does not support", count: 90)
+                .joined(separator: "\n")
+            + "\n```"
+        notFlagged("pasted source is not padding", "too-long", pastedLong, .chat)
+
+        // "as needed" can be the bound rather than the absence of one.
+        notFlagged("a bounded 'as needed' is bounded", "unbounded",
+                   syntheticPrompt(.agentTask) + "\n- Scale the pool as needed between four and "
+                   + "sixteen workers on queue depth.\n")
+
         let copy = syntheticPrompt(.agentTask)
         let r8 = PromptLinter.lint(copy, target: .agentTask, unansweredQuestions: 0, draft: copy)
         check("linter: verbatim copy flagged", r8.issues.contains { $0.id == "copy" })
 
         let empty = PromptLinter.lint("", target: .chat, unansweredQuestions: 0)
         check("linter: empty output is a blocker", empty.blockers.first?.id == "empty")
+
+        // MARK: Gate integrity
+        //
+        // Every narrowing above exists to stop a false positive, and each one is an escape a
+        // defect can walk through. These are the attacks: for each escape, the input that would
+        // slip past the gate if the narrowing went one step too far. A reviewer found all of
+        // them in one pass over the diff, which is the argument for keeping them here.
+
+        let good = syntheticPrompt(.agentTask)
+
+        // Two fixtures need real surgery rather than a patch, so they are written out. Patching the
+        // synthetic prompt with `replacingOccurrences` silently matched nothing when its skeleton
+        // changed, and the test then passed by asserting against the unmodified prompt.
+        let qualityOnly = """
+        # Add a retry budget to the webhook sender
+
+        ## Objective
+        Stop the sender from dropping events when a receiver is unavailable.
+
+        ## Context
+        Receivers time out during their own deploys and the event is lost.
+
+        ## Requirements
+        Retry three times with exponential backoff, and mark the row delivered only on 2xx.
+
+        ## Output contract
+        One pull request, English, under 200 words, with a unified diff.
+
+        ## Success criteria
+        Each section is well written and looks professional.
+        Every part is clear and engaging.
+
+        ## Verification
+        Run the package tests and paste the last ten lines of output.
+        """
+
+        let negatedLabel = """
+        # Add a retry budget to the webhook sender
+
+        ## Objective
+        Stop the sender from dropping events when a receiver is unavailable.
+
+        ## Context
+        Receivers time out during their own deploys and the event is lost.
+
+        ## Requirements
+        Retry three times with exponential backoff, and mark the row delivered only on 2xx.
+
+        No output format: produce whatever reads best.
+
+        ## Success criteria
+        The timeouts fixture produces three attempts and `go test` exits 0.
+
+        ## Verification
+        Run the package tests and paste the last ten lines of output.
+        """
+
+        // `partWords` used to skip any *line* naming a part, which silenced the canonical
+        // contradiction whenever both bounds mentioned the same artefact. A bound is now scoped
+        // to the artefact named nearest before it, so the same artefact must still conflict.
+        flagged("limits: two bounds on one artefact still conflict", "limit-conflict-words",
+                good + "\nKeep the email under 250 words. The email must be at least 600 words.\n")
+        flagged("limits: a substring is not the same artefact", "limit-conflict-words",
+                good + "\nKeep the profile under 250 words. The report must be at least 600 words.\n")
+        notFlagged("limits: two artefacts with their own budgets do not conflict",
+                   "limit-conflict-words",
+                   good + "\nThe user guide needs at least 800 words; the release note stays under 200.\n")
+
+        // A bolded sub-title inside a section must not empty the section body. Ending a section at
+        // the next heading of any kind switched off every check that reads the body.
+        let subTitled = """
+        # Add a retry budget to the webhook sender
+
+        ## Objective
+        Stop the sender from dropping events when a receiver is unavailable.
+
+        ## Context
+        Receivers time out during their own deploys and the event is lost.
+
+        ## Requirements
+        Retry three times with exponential backoff, and mark the row delivered only on 2xx.
+
+        ## Output contract
+        One pull request, English, under 200 words, with a unified diff.
+
+        ## Success criteria
+        **Quality bar**
+        - It should be high quality and thorough.
+        - The result must be excellent.
+
+        ## Verification
+        Run the package tests and paste the last ten lines of output.
+        """
+        flagged("sections: a bold sub-title does not empty the section", "vague-criteria", subTitled)
+
+        // A title above a delivered reply is still a delivered reply.
+        flagged("executed: a title does not disguise a handover", "executed",
+                "Rewritten reply, under 100 words:\n\nHere is the reply you asked for: Dear customer, "
+                + "we have reviewed your case and the refund is on its way.", .chat)
+        notFlagged("executed: a request quoting an artefact is not a handover", "executed",
+                   "Here is the reply our support team sent, in full: Dear customer, we have reviewed "
+                   + "your case. Rewrite it so it does not promise a date, keep it under 100 words, "
+                   + "plain prose, no preamble, and do not apologise twice.", .chat)
+
+        // `none` is a substring of `nonetheless`. The line has to carry an alternative as well —
+        // that is the mechanism: the decline test needs both a section keyword and a decline word
+        // on one line, and "nonetheless" satisfied the second half of that pair.
+        let nonetheless = """
+        # Add a retry budget to the webhook sender
+
+        ## Objective
+        Stop the sender from dropping events when a receiver is unavailable.
+
+        Nonetheless the context here is unclear and you will have to guess at it.
+
+        ## Requirements
+        Retry three times with exponential backoff, and mark the row delivered only on 2xx.
+
+        ## Output contract
+        One pull request, English, under 200 words, with a unified diff.
+
+        ## Success criteria
+        The timeouts fixture produces three attempts and `go test` exits 0.
+
+        ## Verification
+        Run the package tests and paste the last ten lines of output.
+        """
+        flagged("sections: nonetheless is not a decline", "missing-context", nonetheless)
+        // A label that denies the section is not evidence of one.
+        let negatedReport = PromptLinter.lint(negatedLabel, target: .agentTask, unansweredQuestions: 0)
+        check("linter: sections: a negated label does not satisfy the section",
+              negatedReport.issues.contains { $0.id == "missing-output contract" },
+              negatedReport.issues.map(\.id).joined(separator: ","))
+
+        // Adjective theatre is padding whatever else is on the line.
+        flagged("filler: a stack of product adjectives is filler", "filler",
+                good + "\nThe tone is world-class, cutting-edge and best-in-class throughout.\n")
+        notFlagged("filler: a product adjective naming the subject is not filler", "filler",
+                   good + "\nAnnounce the cutting-edge imaging sensor in the release note.\n")
+
+        // A quantifier is not a measurement.
+        flagged("criteria: a quantified quality judgement is not checkable", "vague-criteria", qualityOnly)
+
+        // Underscored caps and table bodies are still emphasis.
+        flagged("shouting: an underscored caps sentence is shouting", "shouting",
+                good + "\nDO_NOT_EVER_SHIP_THIS_WITHOUT_ASKING_ME_FIRST.\n")
+        flagged("shouting: a table body is still scanned", "shouting",
+                good + "\n| RULE | DETAIL |\n| --- | --- |\n| NEVER EVER SHIP THIS | unrecoverable |\n")
+        notFlagged("shouting: a table header is not shouting", "shouting",
+                   good + "\n| SOURCE | TARGET |\n| --- | --- |\n| a | b |\n")
+        notFlagged("shouting: an identifier is not shouting", "shouting",
+                   good + "\nRead STRIPE_SECRET_KEY from the environment.\n")
+
+        // "and also" is not a choice; an output verb plus "in <format>" is a declaration.
+        flagged("formats: and-also is not an either-or", "format-conflict",
+                good + "\nReturn the output as JSON if you can, and also as CSV.\n")
+        flagged("formats: an output verb plus in-format declares", "format-conflict",
+                good + "\nOutput the results in JSON. Output the log in CSV.\n")
+        notFlagged("formats: a conditional choosing between them is fine", "format-conflict",
+                   good + "\nReturn JSON by default, or CSV when the caller asks for it.\n")
+
+        // Density, not just an absolute count.
+        flagged("placeholders: eight fields in forty words is a skeleton", "placeholders",
+                "Draft the renewal letter to {{CLIENT NAME}} at {{CLIENT ADDRESS}}, naming "
+                + "{{ACCOUNT MANAGER}} as contact. State the start {{START DATE}} and end "
+                + "{{END DATE}}, the fee {{ANNUAL FEE}} and uplift {{UPLIFT}}, and the notice "
+                + "period {{NOTICE}}. Plain prose, under 200 words, no preamble.", .chat)
+
+        // A label that hands the choice back records nothing.
+        let deferred = good.replacingOccurrences(of: "## Context", with: "## Notes") + "\nDecisions: whatever you think is best.\n"
+        check("linter: a deferred decision is not a recorded one",
+              PromptLinter.lint(deferred, target: .agentTask, unansweredQuestions: 2)
+                  .issues.contains { $0.id == "silent-defaults" })
+
+        // A prompt is written in the imperative, so a recording phrased in the second person —
+        // "Assume a developer will replace the placeholders" — was invisible to a check that only
+        // knew first-person narration. A live run was failed for not recording decisions it had
+        // recorded, in the correct voice.
+        let imperativeRecord = """
+        Draft the release note for the new dashboard, in plain prose, under 150 words, no preamble
+        and no sign-off. Assume the reader saw the old dashboard and needs the delta only. Name the
+        owner as a field to fill in rather than guessing one.
+        """
+        check("linter: an imperative assumption counts as a recorded decision",
+              !PromptLinter.lint(imperativeRecord, target: .chat, unansweredQuestions: 3)
+                  .issues.contains { $0.id == "silent-defaults" },
+              PromptLinter.lint(imperativeRecord, target: .chat, unansweredQuestions: 3)
+                  .issues.map(\.id).joined(separator: ","))
+        // A gap-handling instruction is an output constraint, not a decision: it says what not to
+        // do when a value is missing, not which value was chosen.
+        check("linter: a gap-handling constraint is not a recorded decision",
+              PromptLinter.lint(imperativeRecord.replacingOccurrences(
+                                    of: "Assume the reader saw the old dashboard and needs the delta only.", with: ""),
+                                target: .chat, unansweredQuestions: 3)
+                  .issues.contains { $0.id == "silent-defaults" },
+              "recorded nothing about the open questions")
+        // The heading `## Assumptions` is the section's name, not evidence of an entry in it.
+        let bareHeading = good.replacingOccurrences(of: "## Context", with: "## Notes")
+            + "\nDecisions: whatever you think is best.\n"
+        check("linter: an empty assumptions heading is not a recorded decision",
+              PromptLinter.lint(bareHeading, target: .agentTask, unansweredQuestions: 2)
+                  .issues.contains { $0.id == "silent-defaults" },
+              PromptLinter.lint(bareHeading, target: .agentTask, unansweredQuestions: 2)
+                  .issues.map(\.id).joined(separator: ","))
+
+        // A bound elsewhere in the sentence does not bound the phrase.
+        flagged("effort: a number in another clause does not bound it", "unbounded",
+                good + "\nRead the surrounding modules as much as possible, and keep the diff under 300 lines.\n")
+
+        // An inch mark is not a quote.
+        flagged("meta: an inch mark does not hide a handover phrase", "meta",
+                good + "\nThe card width is 12\" and hope this helps you pick a 6\" gutter for the grid.\n")
+
+        // A title plus bold sections is the commonest model output shape.
+        let titleAndBold = """
+        # Add a retry budget to the webhook sender
+        **Objective** Stop the sender from dropping events when a receiver is unavailable.
+        **Context** Receivers time out during their own deploys and the event is lost.
+        **Inputs** `internal/webhook/sender.go` and the timeouts fixture.
+        **Requirements** Retry three times with exponential backoff; mark the row delivered on 2xx.
+        **Constraints and non-goals** Do not change the outbox schema. Ordering is out of scope.
+        **Approach** Wrap the POST in a loop and keep the backoff pure so it is testable.
+        **Output contract** One pull request, English, under 200 words, with a unified diff.
+        **Success criteria** The fixture produces three attempts and `go test` exits 0.
+        **Verification** Run the package tests and paste the last ten lines of output.
+        **Priorities when instructions conflict** Correctness, then diff size, then speed.
+        **Autonomy and escalation** Ask before touching anything outside `internal/webhook/`.
+        """
+        check("linter: a title plus bold sections is a complete prompt",
+              PromptLinter.lint(titleAndBold, target: .agentTask, unansweredQuestions: 0).isClean,
+              PromptLinter.lint(titleAndBold, target: .agentTask, unansweredQuestions: 0)
+                  .issues.map(\.id).joined(separator: ","))
+
+        // A bulleted label list is a real way to write the sections.
+        let bulletedLabels = """
+        - Objective: Stop the sender from dropping events when a receiver is unavailable.
+        - Context: Receivers time out during their own deploys and the event is lost.
+        - Inputs: `internal/webhook/sender.go` and the timeouts fixture.
+        - Requirements: Retry three times with exponential backoff; mark the row delivered on 2xx.
+        - Constraints and non-goals: Do not change the outbox schema. Ordering is out of scope.
+        - Approach: Wrap the POST in a loop and keep the backoff pure so it is testable.
+        - Output contract: One pull request, English, under 200 words, with a unified diff.
+        - Success criteria: The fixture produces three attempts and `go test` exits 0.
+        - Verification: Run the package tests and paste the last ten lines of output.
+        - Priorities when instructions conflict: Correctness, then diff size, then speed.
+        - Autonomy and escalation: Ask before touching anything outside `internal/webhook/`.
+        """
+        check("linter: a bulleted label list is a complete prompt",
+              PromptLinter.lint(bulletedLabels, target: .agentTask, unansweredQuestions: 0).isClean,
+              PromptLinter.lint(bulletedLabels, target: .agentTask, unansweredQuestions: 0)
+                  .issues.map(\.id).joined(separator: ","))
+
+        // A quoted phrase the prompt forbids is not the prompt using it — including the
+        // product-adjective family, which read the raw lines instead of the stripped text.
+        notFlagged("filler: a quoted forbidden adjective is not filler", "filler",
+                   good + "\nNever describe the sensor as \"cutting-edge\": the copy should be plain.\n")
 
         // MARK: Pipeline shape
 

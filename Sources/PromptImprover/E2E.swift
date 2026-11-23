@@ -49,7 +49,16 @@ enum E2E {
             case "--target":
                 if let v = next() { c.target = PromptTarget(rawValue: v) ?? .agentTask; i += 1 }
             case "--rigor":
-                if let v = next() { c.rigor = Rigor(rawValue: v) ?? .standard; i += 1 }
+                if let v = next() {
+                    // A typo must not buy the cheap pipeline. `deepish` used to fall back to
+                    // Standard and report PASS, which is the direction that hides defects.
+                    guard let r = Rigor.parse(v) else {
+                        FileHandle.standardError.write(Data(
+                            "unknown rigor \(v) — use one of: \(Rigor.allCases.map(\.rawValue).joined(separator: ", "))\n".utf8))
+                        return nil
+                    }
+                    c.rigor = r; i += 1
+                }
             case "--out":
                 if let v = next() { c.outPath = v; i += 1 }
             case "--price-in":
@@ -138,7 +147,12 @@ enum E2E {
             // Stage 4. The same policy the app uses, from the same module: the union of the
             // critic's issues and the gate's blockers/majors, judged by RepairGuard. This used to
             // be re-implemented here and had drifted.
-            let repairIssues = critique.map { RepairGuard.issues(critique: $0, lint: lint) } ?? []
+            //
+            // An unparseable verdict is not an exemption. `critique.map { … } ?? []` skipped the
+            // gate whenever the critic's JSON failed to parse, so a stray brace in its prose
+            // switched off the deterministic half of the gate — the exact opposite of what the
+            // gate is for. An empty critique says nothing, which leaves the gate's issues.
+            let repairIssues = RepairGuard.issues(critique: critique ?? Critique(), lint: lint)
             if c.rigor.repairs, !repairIssues.isEmpty {
                 t = Date()
                 var repaired = ""
@@ -155,13 +169,14 @@ enum E2E {
                     log("repair", "accepted — structure \(after.score)/100")
                     // Re-score the shipped prompt so the rubric number describes what was produced,
                     // not what it replaced.
+                    let before = critique?.total(for: c.target)
                     t = Date()
                     // Same tolerance as the app: losing the re-check is not losing the prompt.
                     do {
                         critique = try await engine.verify(prompt: prompt)
                         calls += 1
                         stamp("reverify", t)
-                        log("reverify", critique.map { "\($0.verdict), rubric \($0.total(for: c.target))/100" } ?? "unparseable")
+                        log("reverify", reverified(critique, was: before, target: c.target))
                     } catch {
                         // Losing the re-check is not losing the prompt: keep the text, drop the
                         // score. The previous critique described the pre-repair text.
@@ -225,7 +240,9 @@ enum E2E {
                     "rubric": critique.map { $0.total(for: c.target) } ?? -1,
                     "clean": lint.isClean,
                     "issues": lint.issues.map { ["id": $0.id, "severity": $0.severity.rawValue, "title": $0.title] },
-                    "stages": Dictionary(uniqueKeysWithValues: stageTimes.map { ($0.0, $0.1) }),
+                    // Reduced, not `uniqueKeysWithValues`: a stage stamped twice would trap, and
+                    // the harness exists to report failures rather than become one.
+                    "stages": stageTimes.reduce(into: [String: Double]()) { $0[$1.0] = $1.1 },
                 ]
                 if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
                     try? data.write(to: URL(fileURLWithPath: c.outPath.map { $0 + ".json" } ?? "e2e-result.json"))
@@ -233,8 +250,28 @@ enum E2E {
             }
             return lint.isClean ? 0 : 1
         } catch {
+            // A failed run still spent tokens. Reporting the error without the spend hides the
+            // only number that matters when a stage is failing repeatedly.
+            if calls > 0 || client.usage.inputTokens > 0 {
+                FileHandle.standardError.write(Data("spent: \(client.usage.summary)\n".utf8))
+            }
             return bail(error.localizedDescription)
         }
+    }
+
+    /// The re-check line.
+    ///
+    /// Two rubric scores printed next to each other are an invitation to subtract them, and the
+    /// difference is usually inside the critic's own spread. `RubricNoise` decides whether the gap
+    /// is reportable, so the log stops handing the reader a regression that is not there.
+    private static func reverified(_ c: Critique?, was before: Int?, target: PromptTarget) -> String {
+        guard let c else { return "unparseable" }
+        let after = c.total(for: target)
+        var line = "\(c.verdict), rubric \(after)/100"
+        if let before {
+            line += " (was \(before) — \(RubricNoise.delta(from: before, to: after).note))"
+        }
+        return line
     }
 
     private static func log(_ stage: String, _ message: String) {

@@ -101,6 +101,10 @@ Two structural choices matter more than any single rule:
 1. **The rubric is one object, rendered into every stage.** `Axis` (12 axes, each with a 0/2/4 anchor) is injected into the analyzer, the critic and the repair brief. The score in the UI and the instruction in the prompt cannot drift apart, because they are the same value.
 2. **The model is never the only judge.** The linter is deterministic and catches the failures a model will happily wave through: a prompt with no success criteria, two contradictory length limits, a reply wrapped in a code fence. A prompt that fails the linter is marked as failing even when the critic says "ship".
 
+A linter is only worth having if it is believed, so the governing rule is that **a false positive is worse than a miss**. A wrong verdict costs a repair call and teaches the operator to ignore the panel. Every check is therefore written to fire on the defect and nothing near it: a section counts whether it is a `#` heading, a bold line, a `- Label:` bullet or plain chat prose; a quoted phrase is the prompt *talking about* language rather than using it; `STRIPE_SECRET_KEY` is an identifier, not shouting.
+
+The risk in that direction is the opposite one — a check narrowed until it never fires — so each narrowing is paired with an attack fixture in `SelfTest.swift` that it must still catch: two word budgets on the same artefact, `nonetheless` read as a decline, a bold sub-title that would empty a section, a delivered reply wearing a title.
+
 ## Project layout
 
 ```
@@ -115,20 +119,20 @@ Sources/PromptImprover/
 ├── PipelineModel.swift       What flows between stages: Finding, Diagnosis, Critique, EvalSuite, Rigor
 ├── PromptTarget.swift        The three targets: skeleton, guidance, length aim, few-shot exemplar
 ├── PromptLinter.swift        Lint entry point, report, issue→axis mapping, shared text helpers
-├── LinterChecks.swift        The 15 structural checks, one function each, over one LintContext
+├── LinterChecks.swift        The structural checks, one function each, over one LintContext (19 / 17 / 15 per target)
 ├── MetaPrompts.swift         Every meta-prompt and the brief composer
 ├── ResponseParsing.swift     Tolerant JSON extraction, reasoning-block stripping, fence removal
 ├── RepairGuard.swift         Whether a repair is kept: what changed, not what it scored
 ├── LLMClient.swift           Both wire formats, SSE streaming, retry with backoff, parameter fallback, truncation detection
 ├── Endpoints.swift           Endpoint model, presets, EndpointStore, Keychain wrapper
 ├── Profile.swift             UserProfile, feedback tags, learned preferences
-├── SelfTest.swift            100 offline checks + --lint / --dump-prompts
+├── SelfTest.swift            180 offline checks + --lint / --dump-prompts
 ├── E2E.swift                 Headless pipeline run with a stage trace (--e2e)
-├── VMProbe.swift             Headless driver for the view model: restore, cancel, depth (--vm)
+├── VMProbe.swift             Headless driver for the view model: restore, cancel mid-verify, depth (--vm)
 ├── LoginItem.swift           SMAppService open-at-login
 └── Logo.swift                LogoMark (SwiftUI) + .icns renderer
 Tests/
-├── mock_llm.py               Mock provider: SSE, both wire formats, five failure modes, deterministic per run
+├── mock_llm.py               Mock provider: SSE, both wire formats, ten failure modes, deterministic per run
 └── run_tests.sh              The whole gate: self-tests + every pipeline path
 build.sh                      SwiftPM build → self-test → .app bundle (LSUIElement, icon, ad-hoc codesign)
 ```
@@ -136,7 +140,7 @@ build.sh                      SwiftPM build → self-test → .app bundle (LSUIE
 ## Verifying it
 
 ```sh
-./Tests/run_tests.sh      # 100 offline checks + 16 end-to-end runs against a mock provider
+./Tests/run_tests.sh      # 180 offline checks + 22 runs against a mock provider
 ./build.sh                # runs the self-test before bundling; a regression in the prompts fails the build
 ```
 
@@ -174,7 +178,7 @@ The mock is hostile on purpose: it wraps its JSON in prose and fences, answers t
 - The linter only contains checks where a string test is *sound*. Semantic contradictions are left to the critic on purpose — a word-overlap heuristic flags "always run the tests" against "never commit without running tests" and calls agreement a conflict.
 - `Rigor.fast` skips the diagnosis stage entirely. `askQuestions` never skips it: the toggle controls whether the run *stops* for answers, not whether stage 1 happens, because the analyzer's output is the writer's defect list, task type and risk.
 - A repair is judged on **what changed**, not on the weighted score. Only blockers and majors can veto a repair; minors never do, because the critic re-scores the shipped text anyway. `RepairGuard` is the single home for that policy, and both the app and `--e2e` call it — they had drifted apart when the policy lived in two places.
-- **The rubric number is not a regression signal.** Four runs on one target with one draft and one model scored the final text 90, 80, 84 and 73 — a 17-point spread from the critic's own variance. A repair that drops 18 points is one sample from that distribution, which is why the guard judges on the issue list and not on the score. Do not add a score threshold; it will fire on noise.
+- **The rubric number is not a regression signal.** Four runs on one target with one draft and one model scored the final text 90, 80, 84 and 73 — a 17-point spread from the critic's own variance. A repair that drops 18 points is one sample from that distribution, which is why the guard judges on the issue list and not on the score. Do not add a score threshold; it will fire on noise. The spread lives in `RubricNoise.measuredSpread`, and anything that compares two scores — the harness's repair trace today — goes through `RubricNoise.delta`, which reports a gap inside the spread as no change rather than as a small win or a small regression. The panel shows the number without inviting the comparison, and names the axes the critic actually marked down, because twelve per-axis marks survive that noise far better than their weighted mean.
 - A prompt the gate already passes is only sent to repair when the critic found something *unusable*. Polish has nothing to aim at, so the model rewrites for the sake of rewriting: a live run took a 100/100 prompt and returned 97/100, accepted because minors never veto. A critic blocker or major still repairs a clean prompt — that is the fabrication the linter cannot see, and skipping it would ship the one failure this tool exists to prevent. Two mock modes pin the pair in opposite directions: `/polish/` must spend no call, `/fabricate/` must repair.
 - The linter's issue→axis table is keyed on the ids the checks actually emit. It has been wrong twice (once on a registry label, once on single-word section names while the sections are `"output contract"` and `"success criteria"`), and both times every section blocker reported `consistency`, so a repair was sent looking for a contradiction. A self-test builds the id list from `requiredSections` so renaming a section cannot unmoor its axis.
 - When you change a prompt, run `--dump-prompts` before and after and read the diff. Prompt edits are code changes; they get reviewed like code changes.

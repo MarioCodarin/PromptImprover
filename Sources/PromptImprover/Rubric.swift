@@ -201,6 +201,51 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+/// How much of a rubric score is the prompt and how much is the instrument.
+///
+/// The score is a weighted mean of twelve judgements a model makes in one pass. That is a useful
+/// relative signal inside a single run and a useless absolute one across runs, and the difference
+/// is large enough to be measured rather than assumed: four runs on one target with one draft and
+/// one model returned 90, 80, 84 and 73. Seventeen points, same text, same critic.
+///
+/// So the panel shows the number without inviting a comparison, and every place that *does*
+/// compare two scores — the harness's repair trace, a before/after in a report — goes through
+/// `delta`, which refuses to name a winner inside the spread. A tool that says "73, was 88" leaves
+/// the reader to conclude the prompt got worse; the honest reading is that the critic moved.
+enum RubricNoise {
+
+    /// Widest difference observed between two runs on identical text, in rubric points. Any two
+    /// scores closer together than this are indistinguishable, so a comparison inside the band is
+    /// reported as unchanged rather than as a small win or a small regression.
+    static let measuredSpread = 17
+
+    enum Delta: Equatable {
+        case better(Int)
+        case worse(Int)
+        /// The gap is not larger than the spread. Not a tie — an unanswerable comparison.
+        case withinNoise
+
+        /// Short clause for a log line or a panel row.
+        var note: String {
+            switch self {
+            case .withinNoise: return "inside the \(RubricNoise.measuredSpread)-point run-to-run spread"
+            case .better(let n): return "up \(n), beyond the spread"
+            case .worse(let n): return "down \(abs(n)), beyond the spread"
+            }
+        }
+    }
+
+    /// Compares two scores of the same prompt, or two runs of the same critic.
+    ///
+    /// `<=` and not `<`: the measured 17-point gap was observed between two real runs, so a 17-point
+    /// difference is exactly the case that must not be called a change.
+    static func delta(from before: Int, to after: Int) -> Delta {
+        let change = after - before
+        if abs(change) <= measuredSpread { return .withinNoise }
+        return change > 0 ? .better(change) : .worse(change)
+    }
+}
+
 /// A defect is a named failure mode, not an opinion. Codes are stable so the UI, the tests and the
 /// meta-prompts can refer to them without repeating prose.
 struct Defect: Identifiable, Hashable {

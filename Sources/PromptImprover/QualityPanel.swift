@@ -9,7 +9,9 @@ struct QualityBadge: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(Capsule().fill(Color.primary.opacity(0.06)))
-            .help("Rubric score is the critic's weighted judgement. Structure score is the deterministic linter.")
+            .help("Rubric is the critic's weighted judgement of twelve axes; its run-to-run spread "
+                  + "on identical text is \(RubricNoise.measuredSpread) points, so read it as a band. "
+                  + "Structure is the deterministic linter: same input, same score, every time.")
     }
 }
 
@@ -65,17 +67,31 @@ struct QualityPanel: View {
                 // Labelled as a rubric score, not a quality percentage: the two 0-100 numbers on
                 // this panel come from different instruments and one blocker costs each of them a
                 // different amount.
-                ScoreRow(label: "Rubric", value: c.total(for: vm.runTarget), suffix: "/100 weighted")
+                ScoreRow(label: "Rubric", value: c.total(for: vm.runTarget), suffix: "/100",
+                         help: "Weighted mean of the twelve axes the critic scored. The critic's own "
+                             + "run-to-run spread on identical text is \(RubricNoise.measuredSpread) "
+                             + "points, so treat this as a band and compare it with nothing.")
                 // A missing axis silently scores the generic 2, so the number above is part
                 // assumption. Naming them is the difference between a score and a guess.
                 let absent = c.missingAxes(for: vm.runTarget)
                 if !absent.isEmpty {
-                    Text("Scored without: " + absent.map(\.rawValue).joined(separator: ", "))
+                    Text("Scored without: " + absent.map(\.title).joined(separator: ", "))
                         .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // The part of the score a reader can act on. Twelve per-axis marks survive the
+                // critic's noise far better than their weighted mean does, and naming them turns
+                // "73" into "73, and here is what is dragging it".
+                let weak = c.weakestAxes(for: vm.runTarget)
+                if !weak.isEmpty {
+                    Text("Below the bar: " + weak.map(\.title).joined(separator: ", "))
+                        .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             if let l = vm.lint {
-                ScoreRow(label: "Structure", value: l.score, suffix: "/100")
+                ScoreRow(label: "Structure", value: l.score, suffix: "/100",
+                         help: "Deterministic linter. Same input, same score, every time.")
                 Text(l.summary).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             if let c = vm.critique, !c.strengths.isEmpty {
@@ -94,7 +110,11 @@ struct QualityPanel: View {
             if !c.summary.isEmpty {
                 Text(c.summary).font(.system(size: 12))
             }
-            ForEach(c.issues) { issue in
+            // Positional identity, not `issue.id`. Identity derived from model text collides: two
+            // issues on one axis with an omitted quote and problem produce the same string, and
+            // SwiftUI's behaviour for duplicate ids is undefined. A list this short does not need
+            // stable identity across updates.
+            ForEach(Array(c.issues.enumerated()), id: \.offset) { _, issue in
                 IssueRow(severity: issue.severity.rawValue,
                          title: "\(issue.axis) · \(issue.problem)",
                          detail: issue.quote.isEmpty ? issue.fix : "\u{201C}\(issue.quote)\u{201D} → \(issue.fix)")
@@ -140,7 +160,8 @@ struct QualityPanel: View {
                 Button(vm.copied ? "Copied" : "Copy tests") { vm.copyTests() }
                     .controlSize(.small)
             }
-            ForEach(s.cases) { c in
+            // Same reason as the issue list: two cases can share a name and an empty input.
+            ForEach(Array(s.cases.enumerated()), id: \.offset) { _, c in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(c.name).font(.system(size: 11, weight: .medium))
                     if !c.trap.isEmpty {
@@ -158,6 +179,7 @@ private struct ScoreRow: View {
     let label: String
     let value: Int
     let suffix: String
+    var help: String? = nil
 
     var body: some View {
         HStack(spacing: 8) {
@@ -170,9 +192,15 @@ private struct ScoreRow: View {
                 }
             }
             .frame(height: 5)
-            Text("\(value)\(suffix)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                .frame(width: 52, alignment: .trailing)
+            // Sizes to its own text. A fixed 52-point frame silently clipped "73/100 weighted"
+            // mid-number, which is the worst possible thing to truncate on a score row.
+            Text("\(value)\(suffix)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+                .frame(minWidth: 52, alignment: .trailing)
         }
+        .help(help ?? "")
     }
 
     private var tint: Color {

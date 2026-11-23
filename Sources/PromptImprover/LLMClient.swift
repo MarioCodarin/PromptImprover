@@ -303,7 +303,25 @@ struct LLMClient {
                     }
                 }
 
-                guard !yieldedAnything, transientCount < delays.count, err.isTransient, !Task.isCancelled else { throw err }
+                // Classify the transport before wrapping. Every `URLError` was flattened into
+                // `.api(<localized text>)`, and `.isTransient` only recognises three phrases in
+                // that text — so a dropped socket ("The network connection was lost.") or a
+                // timeout ("The request timed out.") was never retried. Those are the most common
+                // real failures, and the whole backoff ladder was unreachable for them.
+                //
+                // `cannotConnectToHost` is deliberately not transient: a wrong base URL must fail
+                // fast rather than spend eleven seconds proving it.
+                // `.dnsLookupFailed` and `.cannotFindHost` are deliberately absent, for the same
+                // reason as `.cannotConnectToHost`: they are what a mistyped base URL produces, and
+                // retrying a typo spends the whole backoff ladder — four stages of 1 + 3 + 8 s
+                // proving the same misspelling. A DNS failure that is genuinely transient is rare
+                // next to a typo, and the run reports the error either way.
+                let transportTransient = (error as? URLError).map {
+                    [.timedOut, .networkConnectionLost, .notConnectedToInternet,
+                     .secureConnectionFailed].contains($0.code)
+                } ?? false
+                guard !yieldedAnything, transientCount < delays.count,
+                      err.isTransient || transportTransient, !Task.isCancelled else { throw err }
                 // Count transient failures separately from parameter fallbacks: a gateway that
                 // rejected two optional parameters must not eat the retries meant for a 503.
                 transientCount += 1
@@ -332,6 +350,13 @@ struct LLMClient {
         }
 
         var sawData = false, stray = ""
+        // A truncated reply is thrown *after* the loop, not in it. On the chat-completions wire
+        // `finish_reason: "length"` arrives in one chunk and the `stream_options.include_usage`
+        // chunk arrives after it, so throwing at the finish_reason abandoned the stream before the
+        // tokens were read — a cut-off call then contributed zero to the counter, and the run
+        // under-reported what it had actually spent. Anthropic puts `usage` on the same
+        // `message_delta` as `stop_reason`, so only that format was ever correct.
+        var truncated = false
         for try await line in bytes.lines {
             guard line.hasPrefix("data:") else {
                 if !line.hasPrefix("event:") && !line.hasPrefix(":") && stray.count < 2000 { stray += line }
@@ -349,10 +374,11 @@ struct LLMClient {
             recordUsage(obj)
             if let stop = stopReason(from: obj) {
                 // Anthropic reports max_tokens here; the chat-completions format uses finish_reason "length".
-                if stop == "max_tokens" || stop == "length" { throw LLMError.truncated }
+                if stop == "max_tokens" || stop == "length" { truncated = true; continue }
             }
             if let chunk = delta(from: obj), !chunk.isEmpty { yield(chunk) }
         }
+        if truncated { throw LLMError.truncated }
         // Some proxies answer 200 with a plain JSON error and no SSE at all.
         if !sawData, !stray.isEmpty {
             let obj = try? JSONSerialization.jsonObject(with: Data(stray.utf8)) as? [String: Any]

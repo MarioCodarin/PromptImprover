@@ -43,18 +43,31 @@ enum ResponseParsing {
 
     // MARK: - Tolerant JSON
 
-    /// Pulls the first complete JSON object out of a model reply. Models wrap JSON in prose, fences, or
-    /// emit a second object afterwards; a brace counter that respects string literals handles all three.
+    /// Pulls the first *parseable* JSON object out of a model reply.
+    ///
+    /// Models wrap JSON in prose, fences, or emit a second object afterwards; a brace counter that
+    /// respects string literals handles all three. It also has to survive a `{` that is not JSON at
+    /// all, which is why this walks candidate starts instead of committing to the first one: a
+    /// brief mentioning `{{name}}` or an example object before the answer used to consume the one
+    /// attempt, and every consumer then degraded silently — `parseDiagnosis` returned an all-default
+    /// diagnosis, so the writer ran blind with no findings and no questions.
     static func jsonObject(from raw: String) -> [String: Any]? {
         let text = unfence(stripThinking(raw))
-        guard let start = text.firstIndex(of: "{") else { return nil }
-
+        // One scan. A candidate object is a span that opens at brace depth 0 and closes back at 0,
+        // so a `{` nested inside an unterminated one is never offered as a start: falling back to
+        // an inner object would return a partial parse that looks like a valid answer, which is
+        // worse than returning nothing.
+        //
+        // The depth is clamped at zero. Prose is allowed to contain a stray brace — "wrap it in {
+        // then paste the answer", a `{` in an example, a `}` from a truncated quote — and an
+        // unclamped counter latched: one unmatched `}` drove the depth to -1, after which no real
+        // opener was ever offered, and one unmatched `{` left the depth at 1 so the answer closed
+        // to 1 and never to 0. Both silently produced an all-default diagnosis.
         var depth = 0
+        var start: String.Index?
         var inString = false
         var escaped = false
-        var end: String.Index?
-
-        var i = start
+        var i = text.startIndex
         while i < text.endIndex {
             let c = text[i]
             if inString {
@@ -62,18 +75,77 @@ enum ResponseParsing {
                 else if c == "\\" { escaped = true }
                 else if c == "\"" { inString = false }
             } else {
-                if c == "\"" { inString = true }
-                else if c == "{" { depth += 1 }
-                else if c == "}" {
+                switch c {
+                case "\"": inString = true
+                case "{":
+                    if depth == 0 { start = i }
+                    depth += 1
+                case "}":
+                    // A closer with no opener is prose, not structure.
+                    guard depth > 0 else { i = text.index(after: i); continue }
                     depth -= 1
-                    if depth == 0 { end = i; break }
+                    if depth == 0, let s = start {
+                        if let obj = parseObject(text[s...i]) { return obj }
+                        // The span was not an object: forget it and keep scanning, so a second
+                        // object after a prose brace is still found.
+                        start = nil
+                    }
+                default: break
                 }
             }
             i = text.index(after: i)
         }
-        guard let end else { return nil }
-        let slice = text[start...end]
-        return (try? JSONSerialization.jsonObject(with: Data(slice.utf8))) as? [String: Any]
+        // An opener that never closed is deliberately not retried from the next brace. A `{` in
+        // prose followed by a complete answer and a genuinely truncated object have the same
+        // shape — `wrap it in { then paste {"a":1}` and `{"a":1,"b":{"c":2}` both leave the depth
+        // at 1 — so retrying would return `{"c":2}` for the truncated object, and a partial parse
+        // that looks like a valid answer is worse than none. The callers already treat nil as "the
+        // model said nothing" and fall back to the linter's own findings.
+        return nil
+    }
+
+    /// Parses one brace-balanced slice, tolerating a trailing comma before `}` or `]`.
+    ///
+    /// A trailing comma is the most common defect in model JSON. Rejecting it was spec-correct and
+    /// useless: the parse failed, the caller got nil, and the run carried on with no defect list
+    /// and no signal. Stripped here in the scanner rather than with a regex, because `,(\s*[}\]])`
+    /// would corrupt any string literal containing `,}`.
+    private static func parseObject(_ slice: Substring) -> [String: Any]? {
+        if let obj = (try? JSONSerialization.jsonObject(with: Data(slice.utf8))) as? [String: Any] {
+            return obj
+        }
+        let repaired = droppingTrailingCommas(slice)
+        guard repaired != slice else { return nil }
+        return (try? JSONSerialization.jsonObject(with: Data(repaired.utf8))) as? [String: Any]
+    }
+
+    /// Removes a comma that only precedes `}` or `]`, leaving every string literal untouched.
+    ///
+    /// One pass over characters, tracking string state, with a lookahead to the next structural
+    /// character. Doing this with a regex would corrupt a value that legitimately contains `,}`.
+    private static func droppingTrailingCommas(_ slice: Substring) -> String {
+        let chars = Array(slice)
+        var out = ""
+        out.reserveCapacity(chars.count)
+        var inString = false
+        var escaped = false
+        for (i, c) in chars.enumerated() {
+            if inString {
+                if escaped { escaped = false }
+                else if c == "\\" { escaped = true }
+                else if c == "\"" { inString = false }
+                out.append(c)
+                continue
+            }
+            if c == "\"" { inString = true; out.append(c); continue }
+            if c == "," {
+                var j = i + 1
+                while j < chars.count, chars[j].isWhitespace { j += 1 }
+                if j < chars.count, chars[j] == "}" || chars[j] == "]" { continue }
+            }
+            out.append(c)
+        }
+        return out
     }
 
     static func parseDiagnosis(_ raw: String) -> Diagnosis {
@@ -88,9 +160,18 @@ enum ResponseParsing {
         d.findings = (obj["findings"] as? [Any] ?? []).compactMap { item in
             guard let f = item as? [String: Any],
                   let code = f["code"] as? String else { return nil }
-            let sev = Defect.Severity(rawValue: (f["severity"] as? String ?? "minor").lowercased())
-                ?? Defect.severity(for: code)
-            return Finding(code: code.uppercased(),
+            // The taxonomy is keyed on upper-case codes. Looking it up with the model's raw text
+            // meant `{"code":"d07"}` was labelled minor in the list while `Finding.title` reported
+            // it as a blocker — one finding, two severities.
+            //
+            // An *omitted* severity also falls through to the taxonomy. It used to default to
+            // "minor" outright, so the code — which is the authoritative field, and is what the
+            // defect list is keyed on — was never consulted at all.
+            let upper = code.uppercased()
+            let declared = (f["severity"] as? String)
+                .flatMap { Defect.Severity(rawValue: $0.lowercased()) }
+            let sev = declared ?? Defect.severity(for: upper)
+            return Finding(code: upper,
                            severity: sev,
                            quote: (f["quote"] as? String) ?? "",
                            fix: (f["fix"] as? String) ?? "")

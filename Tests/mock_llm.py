@@ -18,6 +18,8 @@ The first path segment selects a failure mode, so plumbing can be tested without
     /nojson/v1/...     every stage's first request gets HTTP 400 for response_format, then succeeds
     /strict/v1/...     rejects stream_options and reasoning_effort with 400, like a locked-down gateway
     /anthropic/v1/...  speaks the /messages SSE shape instead of /chat/completions
+    /slow/v1/...       every stage takes 1.5s, so a mid-stage Stop can be pressed
+    /garbage/v1/...    the verifier's reply is unparseable, so only the linter can gate
 """
 
 import json
@@ -280,6 +282,11 @@ def payload_for(kind: str, attempt: int, mode: str = "") -> str:
         # Wrapped in prose and a fence on purpose: the parser has to cope.
         return "Here is my analysis:\n```json\n" + json.dumps(DIAGNOSIS) + "\n```"
     if kind == "critique":
+        if mode == "garbage":
+            # Prose with a stray brace pair before the answer: not JSON, so the parser returns
+            # nothing. The verifier has said nothing, which must leave the linter's own findings
+            # as the only issues — an unparseable verdict is not an exemption from the gate.
+            return 'I looked at it. {draft} seems close, but I cannot score it. {"verdict": "ship"'
         if mode == "polish":
             return json.dumps(CRITIQUE_POLISH)
         if mode == "fabricate":
@@ -334,7 +341,7 @@ class Handler(BaseHTTPRequestHandler):
         parts = self.path.lstrip("/").split("/")
         mode = "normal"
         if parts and parts[0] in ("truncate", "retry", "nojson", "anthropic", "strict", "revert",
-                                  "polish", "fabricate"):
+                                  "polish", "fabricate", "slow", "garbage"):
             mode = parts[0]
             parts = parts[1:]
         return mode, "/" + "/".join(parts)
@@ -380,6 +387,12 @@ class Handler(BaseHTTPRequestHandler):
                 print("MOCK-400 reasoning_effort", flush=True)
                 self._json(400, {"error": {"message": "Unrecognized request argument supplied: reasoning_effort"}})
                 return
+
+        # A gateway that takes its time. The state machine's mid-stage behaviour — Stop during
+        # "Checking it against the rubric…" — is only observable if the stage lasts long enough to
+        # press it, and a loopback mock answers in under a millisecond.
+        if mode == "slow":
+            time.sleep(1.5)
 
         self.attempts[(mode, kind)] = attempt + 1
         if kind == "write":

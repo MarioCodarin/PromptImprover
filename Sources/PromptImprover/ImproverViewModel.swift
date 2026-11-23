@@ -73,6 +73,9 @@ final class ImproverViewModel: ObservableObject {
 
     /// Why a repair was discarded, for the panel. Nil when nothing was discarded.
     @Published var repairNote: String?
+    /// Whether the verify currently running is the re-check after a repair. The two are the same
+    /// phase but their verdicts mean different things, and `cancel` has to tell them apart.
+    private var verifyingRepaired = false
 
     static let rigorKey = "improver.rigor"
 
@@ -213,34 +216,49 @@ final class ImproverViewModel: ObservableObject {
     private func afterWrite(run: Int) {
         guard run == runID else { return }
         lint = PromptLinter.lint(output, target: runTarget, unansweredQuestions: unansweredCount(), draft: draft)
-        guard runRigor.verifies else { finish(run: runID); return }
-        verify()
+        // The text is final at this point, so it is now something a later failure can restore.
+        // Without this, a verify that threw left nothing to restore and `fail` blanked a finished,
+        // already-linted prompt — while an *unparseable* verify reply kept it. One broken stage,
+        // two outcomes, decided by which way it broke.
+        lastGood = (output, history, lint, critique)
+        guard runRigor.verifies else { finish(run: run); return }
+        verify(run: run)
     }
 
     /// Stage 3. An independent reviewer scores the prompt against the same rubric the writer was given.
-    private func verify() {
+    private func verify(run: Int) {
         guard let engine else { return }
+        verifyingRepaired = false
         phase = .verifying
-        let run = runID
+        // Captured before the Task, like `reverify` already does. Reading `output` inside the task
+        // body reads it after the current MainActor turn yields, so a cancel or a newer run in
+        // between was observed — and the stale task then spent a real call on the wrong text.
+        let prompt = output
 
         task = Task {
             do {
-                let c = try await engine.verify(prompt: output)
+                let c = try await engine.verify(prompt: prompt)
                 guard run == runID, !Task.isCancelled else { return }
                 calls += 1
-                guard let c else { nextAfterVerify(); return }
+                // An unparseable reply is not a verdict, but it is not an exemption either: with
+                // the critique dropped entirely the deterministic gate stopped existing, so one
+                // stray brace in the critic's prose switched off repair for the whole run. An
+                // empty critique says nothing, which leaves the linter's blockers and majors as
+                // the only issues — exactly the case the gate exists for.
+                let parsed = c ?? Critique()
                 critique = c
                 // Repair is driven by what the critic found *and* what the gate found. They measure
                 // different things, and only the gate is deterministic: a prompt the linter rejects
                 // must not ship because the critic said "ship".
-                let issues = RepairGuard.issues(critique: c, lint: lint)
-                if issues.isEmpty { nextAfterVerify() } else { repair(issues) }
+                let issues = RepairGuard.issues(critique: parsed, lint: lint)
+                if issues.isEmpty { nextAfterVerify(run: run) } else { repair(issues) }
             } catch { fail(error, run: run) }
         }
     }
 
-    private func nextAfterVerify() {
-        if runRigor.writesTests { writeTests() } else { finish(run: runID) }
+    private func nextAfterVerify(run: Int) {
+        guard run == runID else { return }
+        if runRigor.writesTests { writeTests(run: run) } else { finish(run: run) }
     }
 
     /// Stage 4. Only the issues the critic could quote, and only when one is worth fixing.
@@ -278,7 +296,7 @@ final class ImproverViewModel: ObservableObject {
                     repairOutcome = .reverted
                     repairNote = why
                     lastGood = nil
-                    nextAfterVerify()
+                    nextAfterVerify(run: run)
                 } else {
                     repairOutcome = .applied
                     repairNote = nil
@@ -287,17 +305,17 @@ final class ImproverViewModel: ObservableObject {
                     lastGood = nil
                     // The critique on screen describes the pre-repair prompt. Re-score the shipped one,
                     // once, so the number in the panel is a claim about what the user actually copies.
-                    reverify()
+                    reverify(run: run)
                 }
             } catch { fail(error, run: run) }
         }
     }
 
     /// One bounded re-check after a repair. No second repair pass: the loop has to end somewhere.
-    private func reverify() {
-        guard let engine else { nextAfterVerify(); return }
+    private func reverify(run: Int) {
+        guard let engine else { nextAfterVerify(run: run); return }
+        verifyingRepaired = true
         phase = .verifying
-        let run = runID
         let repaired = output
 
         task = Task {
@@ -309,25 +327,26 @@ final class ImproverViewModel: ObservableObject {
                 // under it, there is no score for what is on screen — the previous critique
                 // described the pre-repair text and must not survive.
                 critique = output == repaired ? c : nil
-                nextAfterVerify()
+                nextAfterVerify(run: run)
             } catch {
                 // Losing the re-check is not losing the prompt: keep the repaired text, drop the stale score.
                 guard run == runID else { return }
                 critique = nil
-                nextAfterVerify()
+                nextAfterVerify(run: run)
             }
         }
     }
 
     /// Stage 5 (deep only). Tests the user can run before trusting the prompt.
-    private func writeTests() {
-        guard let engine else { finish(run: runID); return }
+    private func writeTests(run: Int) {
+        guard let engine else { finish(run: run); return }
         phase = .testing
-        let run = runID
+        // Captured before the Task, for the same reason `verify` captures it.
+        let prompt = output
 
         task = Task {
             do {
-                let suite = try await engine.tests(prompt: output)
+                let suite = try await engine.tests(prompt: prompt)
                 guard run == runID, !Task.isCancelled else { return }
                 calls += 1
                 evalSuite = suite
@@ -394,13 +413,44 @@ final class ImproverViewModel: ObservableObject {
     // MARK: - Commands
 
     func cancel() {
+        // Stop means "stop working", not "throw away what you already finished". `verifying` and
+        // `testing` run *after* the text is final and linted, so cancelling there must keep it —
+        // this used to blank a complete prompt because `lastGood` is only set by refine and repair,
+        // so the user lost a finished result to a button labelled Stop.
+        let stoppingPhase = phase
+        let textIsFinal = phase == .verifying || phase == .testing
         task?.cancel()
         runID += 1
         // Same rule as `fail`: a restored prompt is a result, a half-streamed fragment is not.
         // Without this, stopping mid-write left a sentence behind an enabled Copy button with no
         // structure score, which reads as a finished prompt.
         let restored = restoreAfterInterruptedRefine()
-        if !restored { output = "" }
+        // The verdicts describe the text. When the text goes, they go with it — a panel showing
+        // "structure 40/100" over an empty box is a claim about nothing.
+        if !restored && !textIsFinal {
+            output = ""
+            lint = nil
+            critique = nil
+            evalSuite = nil
+        }
+        // Stopping inside a re-check is the case `reverify` itself already handles: the critique in
+        // hand scores the *pre-repair* text, and the re-score never lands because `runID` moved on.
+        // Keeping it showed "Rubric 20/100 — Below the bar: …" and "One repair pass was applied.
+        // What is listed above survived it." over a prompt that had just scored 94/100 and shipped.
+        // The same rule as `reverify`: there is no score for what is on screen.
+        if stoppingPhase == .verifying, verifyingRepaired {
+            critique = nil
+            repairOutcome = .none
+            repairNote = nil
+        }
+        // A stopped run still spent what it spent. `finish` is the only other writer of these, so
+        // cancelling after two completed calls reported "2 model calls · 0.0s · 0 in / 0 out" —
+        // two calls that demonstrably cost money, shown as free.
+        elapsed = Date().timeIntervalSince(startedAt)
+        if let usage = client?.usage {
+            tokensIn = usage.inputTokens
+            tokensOut = usage.outputTokens
+        }
         phase = output.isEmpty ? .idle : .done
         if output.isEmpty { expanded = false }
     }
@@ -505,6 +555,9 @@ final class ImproverViewModel: ObservableObject {
             // A stream that died mid-write leaves a sentence, not a prompt. Keeping it would put
             // unvalidated text behind an enabled Copy button with no structure score.
             output = ""
+            lint = nil
+            critique = nil
+            evalSuite = nil
         }
         phase = output.isEmpty ? .idle : .done
     }

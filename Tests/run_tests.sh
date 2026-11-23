@@ -81,7 +81,21 @@ expect "polish does not spend a repair call on a clean prompt" 0 "calls 3" \
 expect "a fabrication the linter cannot see still repairs" 0 "repair accepted" \
   -- "$BIN" --e2e "$BASE/fabricate/v1" --key k --model mock --rigor Standard
 
+# The other half of the gate. An unparseable critic reply used to drop the whole repair decision,
+# so a stray brace in the critic's prose switched off the deterministic half — the half that exists
+# because the critic cannot be trusted. The writer's first attempt is missing its success criteria,
+# so the linter has a blocker and repair must run anyway.
+expect "an unparseable verdict does not switch the gate off" 0 "repair accepted" \
+  -- "$BIN" --e2e "$BASE/garbage/v1" --key k --model mock --rigor Standard
+
 expect "a truncated reply fails loudly instead of shipping half a prompt" 2 "cut off" \
+  -- "$BIN" --e2e "$BASE/truncate/v1" --key k --model mock --rigor Standard
+
+# The tokens a cut-off call spent were still spent. On the chat-completions wire the usage chunk
+# arrives *after* the finish_reason chunk, so throwing at the finish_reason abandoned the stream
+# before the count was read and the call contributed zero. The mock sends 2100/360 per call, so a
+# run whose write is truncated must report both calls, not one.
+expect "a truncated reply still counts the tokens it spent" 2 "spent: 4200 in" \
   -- "$BIN" --e2e "$BASE/truncate/v1" --key k --model mock --rigor Standard
 
 expect "an unreachable host reports an error" 2 "" \
@@ -107,6 +121,25 @@ expect "a labelled section counts as a section" 0 "All 17 structural checks pass
 
 expect "the view model keeps the prompt when a refine dies" 0 "vm probe: all green" \
   -- "$BIN" --vm "$BASE/v1" --key k --model mock --rigor Fast
+
+# `--rigor` is parsed case-insensitively. The `?? .fast` fallback lived in the `--vm` path, so the
+# case that actually regressed is a lower-case depth there; `--e2e` fell back to Standard, which is
+# why the needle has to be the Deep-only stage. `verify` would match on the broken binary too.
+expect "a lower-case rigor is honoured, not silently downgraded" 0 "tests 2 cases" \
+  -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor deep
+expect "the view model honours a lower-case rigor" 0 "vm probe: all green" \
+  -- "$BIN" --vm "$BASE/v1" --key k --model mock --rigor standard
+
+# A typo must not buy the cheap pipeline. `deepish` used to fall back and report PASS.
+expect "an unknown rigor is rejected instead of downgraded" 64 "unknown rigor" \
+  -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor deepish
+
+# The revert branch of RepairGuard is the policy both callers share, and the reason strings the
+# panel renders come from it. It was covered only by offline unit cases, never end to end. The run
+# exits 1 because the *original* was weak and no repair was accepted — that is the correct verdict,
+# and the assertion is on the decision, not on the exit code.
+expect "a repair that makes the prompt worse is discarded" 1 "kept original" \
+  -- "$BIN" --e2e "$BASE/revert/v1" --key k --model mock --rigor Standard
 
 say ""
 if [[ $FAILS -eq 0 ]]; then
