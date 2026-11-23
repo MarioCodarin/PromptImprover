@@ -105,7 +105,7 @@ Two structural choices matter more than any single rule:
 
 ```
 Sources/PromptImprover/
-├── PromptImproverApp.swift   MenuBarExtra + Settings scenes, menu bar icon, CLI hooks (--selftest, --lint, --e2e, --dump-prompts)
+├── PromptImproverApp.swift   MenuBarExtra + Settings scenes, menu bar icon, CLI hooks (--selftest, --lint, --e2e, --vm, --dump-prompts)
 ├── ContentView.swift         PanelView: composer, questions, preview/expanded result, feedback
 ├── QualityPanel.swift        Rubric/structure scores, critic issues, linter findings, acceptance tests
 ├── SettingsView.swift        General (depth) · Profile · Endpoints · Feedback tabs
@@ -117,8 +117,9 @@ Sources/PromptImprover/
 ├── LLMClient.swift           Both wire formats, SSE streaming, retry with backoff, parameter fallback, truncation detection
 ├── Endpoints.swift           Endpoint model, presets, EndpointStore, Keychain wrapper
 ├── Profile.swift             UserProfile, feedback tags, learned preferences
-├── SelfTest.swift            70 offline checks + --lint / --dump-prompts
+├── SelfTest.swift            80 offline checks + --lint / --dump-prompts
 ├── E2E.swift                 Headless pipeline run with a stage trace (--e2e)
+├── VMProbe.swift             Headless driver for the view model: restore, cancel, depth (--vm)
 ├── LoginItem.swift           SMAppService open-at-login
 └── Logo.swift                LogoMark (SwiftUI) + .icns renderer
 Tests/
@@ -146,11 +147,14 @@ Three commands for working on the prompts themselves:
 
 `--lint` takes `--target` because the required sections differ per target: a chat message is prose and has no headings, so it is matched against the body rather than at headings. It takes `--unanswered N` for the same reason the app passes it.
 
+`--vm` covers the half `--e2e` cannot reach. It drives the real `ImproverViewModel` — the same object the window binds to — and asserts the invariants that only exist in the state machine: a refine that dies restores the prompt it replaced instead of destroying it, a cancel mid-write ships no fragment, and a depth change mid-run does not reshape a pipeline already in flight. Those three were all broken at once, and a fully green `--e2e` suite could not see any of them.
+
 `--e2e` drives the same `PromptEngine` the app drives, so it is a real run, not a simulation: stage trace, call count, structure score, rubric score, tokens, and the finished prompt. `--price-in` / `--price-out` are dollars per million tokens, taken from the provider's `/models` response, and make it print the run's actual cost. With `--out`, the acceptance tests are written beside the prompt as `prompt.tests.md` — never appended to it, because a prompt with a test suite stapled on cannot be pasted into a system slot. Point it at the mock to check plumbing without spending tokens:
 
 ```sh
 python3 Tests/mock_llm.py 8765 &
 .build/debug/PromptImprover --e2e http://127.0.0.1:8765/v1 --key k --model mock --rigor Deep
+.build/debug/PromptImprover --vm  http://127.0.0.1:8765/v1 --key k --model mock --rigor Fast
 ```
 
 The mock is hostile on purpose: it wraps its JSON in prose and fences, answers the first write with a prompt that is missing its success criteria, and reports a blocker so the repair loop runs. Its path prefix selects a failure mode — `/truncate/`, `/retry/`, `/nojson/`, `/anthropic/`, `/strict/` — which is how the truncation, backoff, parameter-fallback, Messages-SSE and locked-down-gateway paths are covered. `/strict/` rejects `stream_options` and `reasoning_effort` the way a proxy with a parameter allowlist does; both must degrade rather than fail the run.

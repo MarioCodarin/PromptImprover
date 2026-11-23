@@ -63,14 +63,24 @@ expect "a gateway that rejects response_format still completes" 0 "gate: PASS" \
 expect "a gateway that rejects stream_options and reasoning_effort still completes" 0 "gate: PASS" \
   -- "$BIN" --e2e "$BASE/strict/v1" --key k --model mock --rigor Standard
 
-expect "anthropic usage counts input tokens" 0 "tokens 0 in" \
+# The needle is the assertion. It read "tokens 0 in", which is the bug, not the fix.
+expect "anthropic usage counts input tokens" 0 "tokens 1500 in" \
   -- "$BIN" --e2e "$BASE/anthropic/v1" --format anthropic --key k --model mock --rigor Fast
+
+expect "chat-completions usage counts input tokens" 0 "tokens 2100 in" \
+  -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor Fast
 
 expect "a truncated reply fails loudly instead of shipping half a prompt" 2 "cut off" \
   -- "$BIN" --e2e "$BASE/truncate/v1" --key k --model mock --rigor Standard
 
 expect "an unreachable host reports an error" 2 "" \
   -- "$BIN" --e2e "http://127.0.0.1:1/v1" --key k --model mock --rigor Fast
+
+# --e2e drives PromptEngine, so it covers the pipeline and none of the state machine. The probe
+# drives the real view model: a fail() that destroyed the prompt it had just restored passed a
+# fully green suite, because nothing here ever touched it.
+expect "the view model keeps the prompt when a refine dies" 0 "vm probe: all green" \
+  -- "$BIN" --vm "$BASE/v1" --key k --model mock --rigor Fast
 
 say ""
 if [[ $FAILS -eq 0 ]]; then

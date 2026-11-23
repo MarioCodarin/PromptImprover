@@ -86,9 +86,14 @@ final class UsageTracker {
     }
 
     /// USD, given dollars per million tokens. Returns nil when pricing is unknown.
-    func cost(inputPerM: Double?, outputPerM: Double?) -> Double? {
+    ///
+    /// Cached input bills at a fraction of the fresh rate, so it is priced separately rather than
+    /// ignored: a run that reuses a 2k-token prompt looked free when it was merely cheap.
+    func cost(inputPerM: Double?, outputPerM: Double?, cachedPerM: Double? = nil) -> Double? {
         guard let i = inputPerM, let o = outputPerM else { return nil }
-        return (Double(inputTokens) * i + Double(outputTokens) * o) / 1_000_000
+        let cachedRate = cachedPerM ?? i * 0.1
+        let fresh = max(0, inputTokens - cachedTokens)
+        return (Double(fresh) * i + Double(cachedTokens) * cachedRate + Double(outputTokens) * o) / 1_000_000
     }
 
     var summary: String {
@@ -102,6 +107,16 @@ struct LLMClient {
     let apiKey: String
     /// Shared across the whole pipeline, so one run reports one total.
     let usage = UsageTracker()
+
+    /// Makes every subsequent request fail at the transport. Used by the `--vm` probe to test the
+    /// error paths of the state machine without waiting for a real outage.
+    final class Poison: @unchecked Sendable {
+        private let lock = NSLock()
+        private var dead = false
+        var isDead: Bool { lock.lock(); defer { lock.unlock() }; return dead }
+        func kill() { lock.lock(); dead = true; lock.unlock() }
+    }
+    let poison = Poison()
 
     /// Tuning for one call. Nil means "let the server decide".
     struct Options {
@@ -118,6 +133,8 @@ struct LLMClient {
     }
 
     private func request(_ path: String) throws -> URLRequest {
+        // The `--vm` probe kills the transport to exercise the error paths on demand.
+        if poison.isDead { throw URLError(.cannotConnectToHost) }
         let base = endpoint.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         guard let url = URL(string: "\(base)/\(path)"), let scheme = url.scheme?.lowercased() else {
             throw LLMError.badURL(endpoint.baseURL)
@@ -224,7 +241,11 @@ struct LLMClient {
                         opts.temperature = nil
                         continue
                     }
-                        if opts.maxTokens != nil, lower.contains("max_tokens") || lower.contains("max_completion_tokens") {
+                    // On the Anthropic wire format max_tokens is required, so clearing it just
+                    // falls back to the client default — a bigger number the gateway is more
+                    // likely to reject. There is nothing to drop here.
+                    if endpoint.format != .anthropic, opts.maxTokens != nil,
+                       lower.contains("max_tokens") || lower.contains("max_completion_tokens") {
                         opts.maxTokens = nil
                         continue
                     }

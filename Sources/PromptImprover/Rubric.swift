@@ -12,6 +12,34 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
 
     var id: String { rawValue }
 
+    /// Resolve a model-supplied axis name to an axis.
+    ///
+    /// Models return "output contract" for `deliverable` and "success criteria" for `criteria`.
+    /// Before this, an unrecognised key silently scored that axis at the generic 2 with no trace,
+    /// so a misnamed axis cost 3-4 points on the 0-100 and nobody could see why.
+    static func match(_ raw: String) -> Axis? {
+        let key = raw.lowercased()
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: "-", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        if let exact = Axis(rawValue: key) { return exact }
+        let aliases: [String: Axis] = [
+            "output_contract": .deliverable, "output_format": .deliverable, "format": .deliverable,
+            "success_criteria": .criteria, "acceptance_criteria": .criteria, "criteria": .criteria,
+            "instruction": .goal, "objective": .goal, "purpose": .goal, "intent": .goal,
+            "background": .context, "situation": .context,
+            "input": .inputs, "materials": .inputs, "resources": .inputs,
+            "scope": .constraints, "boundaries": .constraints, "limits": .constraints,
+            "steps": .procedure, "process": .procedure, "approach": .procedure,
+            "escalation": .autonomy, "confirmation": .autonomy,
+            "verification": .verification, "testing": .verification, "checks": .verification,
+            "contradiction": .consistency, "internal_consistency": .consistency,
+            "concision": .economy, "brevity": .economy, "length": .economy,
+            "edge_cases": .robustness, "failure_handling": .robustness, "errors": .robustness,
+        ]
+        return aliases[key]
+    }
+
     var title: String {
         switch self {
         case .goal: return "Goal & intent"
@@ -67,7 +95,7 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
         case .context:
             return "Each fact is one the model could not know, and each one changes a decision. Audience, prior decisions and non-obvious definitions are present; general knowledge is not restated."
         case .inputs:
-            return "Every input is named with its location or shape, and the prompt separates what is supplied from what must be retrieved."
+            return "Every input is named with its location or shape, and the prompt separates what is supplied from what must be retrieved — or the prompt states that none exists and forbids inventing one."
         case .deliverable:
             return "Format, structure, length, language and tone are pinned, plus at least one explicit exclusion (what not to include)."
         case .criteria:
@@ -122,7 +150,7 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .goal: return "No objective; only a topic, a verb or a vibe."
         case .context: return "Nothing but the bare request."
-        case .inputs: return "No mention of what material exists."
+        case .inputs: return "No mention of what material exists, and no statement that there is none. A prompt that says it has no inputs and forbids inventing them is not a 0."
         case .deliverable: return "No statement about the output at all."
         case .criteria: return "Nothing that could distinguish a good result from a bad one."
         case .constraints: return "Nothing is out of scope, so everything is."
@@ -214,6 +242,34 @@ struct Finding: Identifiable, Hashable {
 
     var id: String { code + quote }
 
+    /// Resolve a model-supplied axis name to an axis.
+    ///
+    /// Models return "output contract" for `deliverable` and "success criteria" for `criteria`.
+    /// Before this, an unrecognised key silently scored that axis at the generic 2 with no trace,
+    /// so a misnamed axis cost 3-4 points on the 0-100 and nobody could see why.
+    static func match(_ raw: String) -> Axis? {
+        let key = raw.lowercased()
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: "-", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        if let exact = Axis(rawValue: key) { return exact }
+        let aliases: [String: Axis] = [
+            "output_contract": .deliverable, "output_format": .deliverable, "format": .deliverable,
+            "success_criteria": .criteria, "acceptance_criteria": .criteria, "criteria": .criteria,
+            "instruction": .goal, "objective": .goal, "purpose": .goal, "intent": .goal,
+            "background": .context, "situation": .context,
+            "input": .inputs, "materials": .inputs, "resources": .inputs,
+            "scope": .constraints, "boundaries": .constraints, "limits": .constraints,
+            "steps": .procedure, "process": .procedure, "approach": .procedure,
+            "escalation": .autonomy, "confirmation": .autonomy,
+            "verification": .verification, "testing": .verification, "checks": .verification,
+            "contradiction": .consistency, "internal_consistency": .consistency,
+            "concision": .economy, "brevity": .economy, "length": .economy,
+            "edge_cases": .robustness, "failure_handling": .robustness, "errors": .robustness,
+        ]
+        return aliases[key]
+    }
+
     var title: String { Defect.all.first { $0.code == code }?.title ?? "Defect \(code)" }
 }
 
@@ -226,14 +282,19 @@ struct AxisVerdict: Codable, Hashable {
 struct Diagnosis {
     var brief = ""
     var taskType = ""
-    var domain = ""
     var risk = "low"
     var findings: [Finding] = []
     var scores: [String: AxisVerdict] = [:]
     var assumptions: [String] = []
     var questions: [ClarifyingQuestion] = []
 
-    /// Weighted 0–100. Missing axes score 2 (the "generic" anchor) and say so in the note.
+    /// Axes the model returned nothing for. They score the generic 2, so the caller can say which
+    /// ones were assumed rather than judged.
+    func missingAxes(for target: PromptTarget) -> [Axis] {
+        Axis.applicable(to: target).filter { scores[$0.rawValue] == nil }
+    }
+
+    /// Weighted 0–100. A missing axis scores 2 (the "generic" anchor); `missingAxes` names them.
     func total(for target: PromptTarget) -> Int {
         let axes = Axis.applicable(to: target)
         let weight = axes.reduce(0) { $0 + $1.weight(for: target) }
@@ -273,6 +334,10 @@ struct Critique {
 
     func total(for target: PromptTarget) -> Int {
         Diagnosis(scores: scores).total(for: target)
+    }
+
+    func missingAxes(for target: PromptTarget) -> [Axis] {
+        Diagnosis(scores: scores).missingAxes(for: target)
     }
 }
 

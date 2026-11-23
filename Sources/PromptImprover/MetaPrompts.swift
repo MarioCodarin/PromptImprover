@@ -43,9 +43,9 @@ enum PromptTarget: String, CaseIterable, Identifiable {
     /// The length envelope the structural check enforces, stated to the writer so it can aim.
     var lengthTarget: String {
         switch self {
-        case .agentTask: return "400 to 900 words (hard ceiling 1400)"
-        case .systemPrompt: return "350 to 800 words (hard ceiling 1100)"
-        case .chat: return "60 to 300 words (hard ceiling 500)"
+        case .agentTask: return "under 900 words; a one-step task may be 150. Never pad to reach a floor"
+        case .systemPrompt: return "under 800 words; a durable-principles prompt may be 250. Never pad to reach a floor"
+        case .chat: return "under 300 words, usually 80 to 200"
         }
     }
 
@@ -67,6 +67,10 @@ enum PromptTarget: String, CaseIterable, Identifiable {
             Stop the sender retrying a dead endpoint forever. Two incidents this quarter came from a worker \
             pinned on a 404 for six hours: the queue backed up and every other tenant stalled behind it.
 
+            ## Context
+            Tenants configure their own endpoints and about 2% are abandoned each quarter. The sender \
+            currently retries every failure until the job times out, which is what pinned the worker.
+
             ## Inputs
             - `internal/webhook/sender.go` — the retry loop.
             - `docs/webhooks.md` — the delivery contract we promised clients.
@@ -77,7 +81,9 @@ enum PromptTarget: String, CaseIterable, Identifiable {
             - Emit a counter per outcome so queue depth is observable.
 
             ## Constraints and non-goals
-            - No change to the public `Send` signature. Out of scope: the consumer side.
+            - The public `Send` signature stays as it is unless you confirm first. It is visible to \
+            every caller, so changing it is not reversible in review.
+            - Out of scope: the consumer side, and any change to the retry policy of other senders.
             - Budget: one pull request, under 300 changed lines.
 
             ## Approach
@@ -85,10 +91,11 @@ enum PromptTarget: String, CaseIterable, Identifiable {
             2. Put the budget behind the existing loop. Stop when all three cases above are handled.
             3. Add table tests for permanent, transient and exhausted. Stop when all three fail against \
             the old code.
+            Skip step 3 if the package already has a table-driven retry test; extend it instead.
 
             ## Output contract
-            One pull request. Description naming the files, the tests and the rollback step. English, \
-            under 250 words.
+            One pull request. Description naming the files, the tests and the rollback step, English, \
+            under 250 words. Do not include a changelog entry or a migration note; neither applies.
 
             ## Success criteria
             - `go test ./internal/webhook/...` returns 0.
@@ -115,40 +122,49 @@ enum PromptTarget: String, CaseIterable, Identifiable {
             return """
             The example shows the shape, not the content. Never reuse its subject or wording.
 
-            You are the support triage assistant for a B2B billing product.
+            You are a triage assistant for a support queue. You classify inbound tickets and draft the \
+            first reply, so a human reviews instead of starting from nothing.
 
             ## Purpose
-            Classify each inbound ticket and draft the first reply, so a human reviews instead of \
-            starting from nothing. The readers are finance staff, not engineers, and they are already \
-            frustrated by the time they write.
+            A reviewer should be able to accept or reject your draft in one read. The reader is \
+            already frustrated by the time they write, so your reply assumes good faith and answers \
+            the question that was asked, not the one that is easiest to answer.
 
             ## How you work
-            Read the ticket and any linked invoice before writing. Classify into one of: billing-error, \
-            access, refund-request, other. Then draft one reply covering what happened, what you did, and \
-            what happens next.
+            Read everything the ticket links before writing. Classify first, then draft: a draft \
+            written before the classification tends to answer the wrong question.
+            When a ticket names an amount, a date or an identifier, use the one on the linked record \
+            and nothing else.
 
             ## Priorities when instructions conflict
-            Never state a refund amount you cannot see on an invoice. If the ticket asks for one and no \
-            invoice is linked, classify as billing-error and ask for the invoice number instead.
+            In order, highest first: never state a fact you cannot see on a linked record > never \
+            promise an outcome you cannot authorise > answer the question asked > be brief. When two \
+            of these conflict, the higher one wins and you say in one line what you could not do.
 
             ## Output contract
-            Two fields: `category`, one of the four above; `reply`, plain prose under 120 words with no \
-            greeting formula and no sign-off.
+            Two fields: `category`, a single lowercase word from the queue's own taxonomy; `reply`, \
+            plain prose under 120 words with no greeting formula and no sign-off. Do not include an \
+            apology for the delay.
 
             ## Boundaries
-            Never state a policy that is not in the linked documentation. Never close a ticket. If a \
-            ticket is abusive, answer it once, factually, and flag it for a human.
+            Never state a policy that is not in the linked documentation. Never close, merge or \
+            reassign a ticket. If a ticket is abusive, answer it once, factually, and flag it for a \
+            human rather than disengaging.
 
             ## Assumptions
-            - Ticket text is the only signal; there is no call recording or chat history to consult.
+            - Ticket text and linked records are the only signal; no call recording or chat history exists.
+            - The queue's taxonomy is supplied at runtime; if it is missing, ask for it rather than
+              inventing a category.
             """
         case .chat:
             return """
             The example shows the shape, not the content. Never reuse its subject or wording.
 
             Summarise the incident report below in one paragraph, then list the three decisions it leaves \
-            open. Plain prose, under 150 words, no preamble. Quote the report for every claim you make; \
-            if it does not state a cause, write that the cause is unstated rather than inferring one.
+            open. Plain prose, under 150 words, no preamble and no closing offer to help further. Quote \
+            the report for every claim you make, and keep quotes under fifteen words. If it does not \
+            state a cause, write that the cause is unstated rather than inferring one. If the report is \
+            missing a timeline, say so in the list of open decisions instead of reconstructing one.
             """
         }
     }
@@ -199,6 +215,31 @@ enum MetaPrompts {
     // MARK: - Shared blocks
 
     /// The rubric, rendered for injection. Same anchors the critic scores against.
+    /// The rubric as the analyzer needs it: the axis, what it asks, and the boundary between
+    /// "generic" and "clears the bar".
+    ///
+    /// The analyzer's scores have exactly one consumer — the writer's weak-axis list, thresholded
+    /// at 2 — so the only discrimination it has to make is 2 versus 3. Sending it all three
+    /// anchors of every axis (872 words, the largest block in the pipeline) bought a precision
+    /// nothing reads. The critic keeps the full anchors, because it produces the number on screen.
+    static func diagnosticRubricBlock(for target: PromptTarget) -> String {
+        let axes = Axis.applicable(to: target)
+        let body = axes.map { axis in
+            "- \(axis.rawValue) — \(axis.question)\n  generic (2): \(axis.anchor2)"
+        }.joined(separator: "\n")
+        return """
+        <rubric>
+        Score each axis 0-4 against the boundary below. These axes are the only standard; do not
+        invent a thirteenth.
+
+        0 = nothing on this axis. 1-2 = something, but generic enough that two readers would build
+        different things. 3-4 = the draft clears the boundary; it will survive the writer's edit.
+
+        \(body)
+        </rubric>
+        """
+    }
+
     static func rubricBlock(for target: PromptTarget) -> String {
         let axes = Axis.applicable(to: target)
         let body = axes.map { axis in
@@ -235,7 +276,7 @@ enum MetaPrompts {
         You do not carry out the request. You do not write the prompt. Your output is a judgement plus \
         a short list of questions.
 
-        \(rubricBlock(for: target))
+        \(diagnosticRubricBlock(for: target))
 
         \(defectBlock)
 
@@ -400,18 +441,34 @@ enum MetaPrompts {
     }
 
     /// Builds the single user message for the writer from the draft, the diagnosis and the Q&A round.
+    /// What the risk level should change in the prompt. The analyzer was told the writer used this
+    /// to size its escalation detail; the writer was never told what any level meant.
+    static func riskNote(_ risk: String) -> String {
+        switch risk.lowercased() {
+        case "high":
+            return "spell out every action class that needs confirmation, with the reason and the safer alternative"
+        case "medium":
+            return "state what needs confirmation before acting, in one line"
+        default:
+            return "proceed by default; no confirmation rules needed"
+        }
+    }
+
     static func composeBrief(draft: String, diagnosis: Diagnosis, questions: [ClarifyingQuestion]) -> String {
         var parts = ["<draft>\n\(draft)\n</draft>"]
 
         var diagnosisLines: [String] = []
         if !diagnosis.brief.isEmpty { diagnosisLines.append(diagnosis.brief) }
         if !diagnosis.taskType.isEmpty {
-            diagnosisLines.append("Task type: \(diagnosis.taskType). Risk: \(diagnosis.risk).")
+            diagnosisLines.append("Task type: \(diagnosis.taskType). Risk: \(diagnosis.risk) — \(riskNote(diagnosis.risk)).")
         }
         if !diagnosis.findings.isEmpty {
-            let fs = diagnosis.findings
-                .map { "- \($0.code) (\($0.severity.rawValue)): \($0.fix)" }
-                .joined(separator: "\n")
+            // The quote is the evidence; the code is a private label the writer has no table for.
+            let fs = diagnosis.findings.map { f -> String in
+                let quote = f.quote.trimmingCharacters(in: .whitespacesAndNewlines)
+                let evidence = quote.isEmpty ? "" : "\n  in the draft: \u{201C}\(quote)\u{201D}"
+                return "- [\(f.severity.rawValue)] \(f.title)\(evidence)\n  fix: \(f.fix)"
+            }.joined(separator: "\n")
             diagnosisLines.append("Defects to fix:\n\(fs)")
         }
         // The analyzer's own defaults were being collected and thrown away, which is why prompts
@@ -811,11 +868,14 @@ enum MetaPrompts {
         guard let dict = any as? [String: Any] else { return [:] }
         var out: [String: AxisVerdict] = [:]
         for (key, value) in dict {
+            // Normalise to the canonical axis name, or the score is silently dropped and the axis
+            // falls back to 2 in `total` with nothing on screen to explain it.
+            guard let axis = Axis.match(key) else { continue }
             if let n = value as? NSNumber {
-                out[key.lowercased()] = AxisVerdict(score: n.intValue, note: "")
+                out[axis.rawValue] = AxisVerdict(score: n.intValue, note: "")
             } else if let d = value as? [String: Any] {
                 let score = (d["score"] as? NSNumber)?.intValue ?? 2
-                out[key.lowercased()] = AxisVerdict(score: score, note: (d["note"] as? String) ?? "")
+                out[axis.rawValue] = AxisVerdict(score: score, note: (d["note"] as? String) ?? "")
             }
         }
         return out

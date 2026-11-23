@@ -302,7 +302,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(("event: content_block_delta\ndata: " + json.dumps(ev) + "\n\n").encode())
                 self.wfile.flush()
             stop = "max_tokens" if (mode == "truncate" and kind == "write" and attempt == 0) else "end_turn"
-            done = {"type": "message_delta", "delta": {"stop_reason": stop}}
+            # Anthropic reports input tokens on message_start, nested under "message", and output
+            # tokens on message_delta. The client has to read both places.
+            start = {"type": "message_start",
+                     "message": {"usage": {"input_tokens": 1500, "output_tokens": 1,
+                                           "cache_read_input_tokens": 400}}}
+            self.wfile.write(("event: message_start\ndata: " + json.dumps(start) + "\n\n").encode())
+            self.wfile.flush()
+            done = {"type": "message_delta", "delta": {"stop_reason": stop},
+                    "usage": {"output_tokens": 800}}
             self.wfile.write(("event: message_delta\ndata: " + json.dumps(done) + "\n\n").encode())
             self.wfile.flush()
             return
@@ -326,6 +334,11 @@ class Handler(BaseHTTPRequestHandler):
         truncated = mode == "truncate" and kind == "write" and attempt == 0
         finish = {"choices": [{"delta": {}, "finish_reason": "length" if truncated else "stop", "index": 0}]}
         self.wfile.write(("data: " + json.dumps(finish) + "\n\n").encode())
+        # A usage-only chunk with empty choices, as gateways send when include_usage is set.
+        usage = {"choices": [],
+                 "usage": {"prompt_tokens": 2100, "completion_tokens": 360,
+                           "prompt_tokens_details": {"cached_tokens": 512}}}
+        self.wfile.write(("data: " + json.dumps(usage) + "\n\n").encode())
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 

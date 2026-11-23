@@ -294,11 +294,88 @@ enum SelfTest {
         check("linter: a prose assumption clause is read", !r5s.issues.contains { $0.id == "silent-defaults" },
               r5s.issues.map(\.id).joined(separator: ","))
 
-        // ...but one sentence covering one decision does not cover four open questions.
-        let thinAssumptions = syntheticPrompt(.chat) + "\nAssumptions: a neutral relationship."
-        let r5t = PromptLinter.lint(thinAssumptions, target: .chat, unansweredQuestions: 4)
-        check("linter: too few recorded decisions still fails",
-              r5t.issues.contains { $0.id == "silent-defaults" })
+        // One decision can answer two questions; a string test cannot map questions to decisions,
+        // so presence is the sound property. Absence still fails.
+        let noAssumptions = syntheticPrompt(.chat)
+        let r5t = PromptLinter.lint(noAssumptions, target: .chat, unansweredQuestions: 4)
+        check("linter: unanswered questions with no recorded decision still fail",
+              r5t.issues.contains { $0.id == "silent-defaults" },
+              r5t.issues.map(\.id).joined(separator: ","))
+
+        // The model names axes in its own words; a near-miss must still score, not silently
+        // fall back to the generic 2.
+        let aliased = MetaPrompts.parseDiagnosis(#"{"scores":{"output contract":{"note":"vague","score":1},"success criteria":{"score":3},"goal":2}}"#)
+        check("parse: axis names are aliased to canonical",
+              aliased.scores["deliverable"]?.score == 1 && aliased.scores["criteria"]?.score == 3
+                && aliased.scores["goal"]?.score == 2,
+              aliased.scores.keys.sorted().joined(separator: ","))
+        check("parse: an unmatchable axis is not invented",
+              aliased.scores["output_contract"] == nil)
+
+        // The exemplars are few-shot training data for the writer. If one fails the gate the
+        // writer is taught a shape the tool then rejects — that happened, and nothing caught it.
+        for target in PromptTarget.allCases {
+            let r = PromptLinter.lint(target.exemplar, target: target, unansweredQuestions: 0)
+            check("exemplar passes the gate: \(target.rawValue)", r.isClean,
+                  r.issues.map { $0.id }.joined(separator: ","))
+        }
+
+        // Two deliverables with two formats is one contract, not a contradiction.
+        let twoArtefacts = syntheticPrompt(.agentTask)
+            + "\nProduce the record in Markdown, and emit a JSON summary alongside it.\n"
+        let r6a = PromptLinter.lint(twoArtefacts, target: .agentTask, unansweredQuestions: 0)
+        check("linter: two artefacts with two formats are allowed",
+              !r6a.issues.contains { $0.id == "format-conflict" },
+              r6a.issues.map(\.id).joined(separator: ","))
+
+        // Two parts of one deliverable may each carry a budget.
+        let perPart = syntheticPrompt(.agentTask)
+            + "\nThe summary must be at least 300 words; the appendix at most 200 words.\n"
+        let r6b = PromptLinter.lint(perPart, target: .agentTask, unansweredQuestions: 0)
+        check("linter: per-part budgets are not a conflict",
+              !r6b.issues.contains { $0.id == "limit-conflict" },
+              r6b.issues.map(\.id).joined(separator: ","))
+
+        // A named human reviewer is a legitimate instrument.
+        let human = syntheticPrompt(.agentTask)
+            + "\nA colleague who has not seen the page can name which plan suits a two-person team.\n"
+        let r6c = PromptLinter.lint(human, target: .agentTask, unansweredQuestions: 0)
+        check("linter: a human-checkable criterion passes",
+              !r6c.issues.contains { $0.id == "vague-criteria" },
+              r6c.issues.map(\.id).joined(separator: ","))
+
+        // A verb is not an output contract: "can you write something that fixes it" constrains nothing.
+        let noContract = "Can you write something that fixes the flaky test? It fails one run in ten and I am out of ideas."
+        let r6d = PromptLinter.lint(noContract, target: .chat, unansweredQuestions: 0)
+        check("linter: a chat message needs a bound, not a verb",
+              r6d.issues.contains { $0.id == "missing-output contract" },
+              r6d.issues.map(\.id).joined(separator: ","))
+
+        // A complete one-step task is short by nature; the floor must not call it a failure.
+        let oneStep = """
+        # Fix the flaky retry test
+
+        ## Objective
+        Make `TestRetry` stop failing intermittently.
+
+        ## Context
+        It fails roughly one run in ten and always at the same assertion.
+
+        ## Requirements
+        - Find the shared state between subtests and remove it.
+
+        ## Output contract
+        One commit, English, under 100 words. No changelog entry.
+
+        ## Success criteria
+        `go test -run TestRetry -count=20 ./...` returns 0.
+
+        ## Verification
+        Run that command and paste the final line.
+        """
+        let r6e = PromptLinter.lint(oneStep, target: .agentTask, unansweredQuestions: 0)
+        check("linter: a tight one-step task is not too thin", r6e.isClean,
+              r6e.issues.map { $0.id }.joined(separator: ","))
 
         let mush = "hello there, just wondering if you could maybe help me out a bit with something"
         let r5f = PromptLinter.lint(mush, target: .chat, unansweredQuestions: 0)

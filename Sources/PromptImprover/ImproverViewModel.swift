@@ -34,6 +34,10 @@ final class ImproverViewModel: ObservableObject {
     @Published var askQuestions = true
     @Published var rigor: Rigor = .standard { didSet { UserDefaults.standard.set(rigor.rawValue, forKey: Self.rigorKey) } }
 
+    /// The depth this run was started with. Changing the menu mid-run must not reshape a pipeline
+    /// that is already in flight; the live value only affects the next run.
+    private(set) var runRigor: Rigor = .standard
+
     @Published var phase: Phase = .idle
     @Published var analysis = ""
     @Published var questions: [ClarifyingQuestion] = []
@@ -81,10 +85,18 @@ final class ImproverViewModel: ObservableObject {
     /// Bumped on every start/cancel. A task only writes state while its own run is still current.
     private var runID = 0
     /// Last good result, restored if a refine fails or is stopped.
-    private var lastGood: (output: String, history: [ChatMessage])?
+    /// The result to put back if a refine or repair dies. Carries the scores, because restoring
+    /// the text without them would blank the panel on a prompt that had already been verified.
+    private var lastGood: (output: String, history: [ChatMessage], lint: PromptLinter.Report?, critique: Critique?)?
     private var startedAt = Date()
 
     var isBusy: Bool { [.analyzing, .generating, .verifying, .repairing, .testing].contains(phase) }
+    /// A run owns the error banner from the moment it starts until it finishes, including while it
+    /// waits for the user to answer questions. `isBusy` excludes `.answering` by design, so it is
+    /// the wrong test for "may a background task write here".
+    var ownsErrorBanner: Bool {
+        phase != .idle && phase != .done || task != nil
+    }
     var canRefine: Bool { phase == .done && !output.isEmpty }
 
     /// One line for the panel: what the pipeline did, in numbers.
@@ -113,6 +125,7 @@ final class ImproverViewModel: ObservableObject {
         runID += 1
         self.client = client
         runTarget = target
+        runRigor = rigor
         engine = PromptEngine(client: client, model: model, target: target,
                               profile: profile, draft: draft)
         error = nil; analysis = ""; questions = []; output = ""; history = []; lastGood = nil; expanded = false
@@ -121,7 +134,7 @@ final class ImproverViewModel: ObservableObject {
         tokensIn = 0; tokensOut = 0
         startedAt = Date(); elapsed = 0
 
-        guard rigor.verifies, askQuestions else { runWriter(); return }
+        guard runRigor.verifies, askQuestions else { runWriter(); return }
         analyze()
     }
 
@@ -191,7 +204,7 @@ final class ImproverViewModel: ObservableObject {
     private func afterWrite(run: Int) {
         guard run == runID else { return }
         lint = PromptLinter.lint(output, target: runTarget, unansweredQuestions: unansweredCount(), draft: draft)
-        guard rigor.verifies else { finish(); return }
+        guard runRigor.verifies else { finish(); return }
         verify()
     }
 
@@ -216,7 +229,7 @@ final class ImproverViewModel: ObservableObject {
     }
 
     private func nextAfterVerify() {
-        if rigor.writesTests { writeTests() } else { finish() }
+        if runRigor.writesTests { writeTests() } else { finish() }
     }
 
     /// Stage 4. Only the issues the critic could quote, and only when one is worth fixing.
@@ -228,7 +241,7 @@ final class ImproverViewModel: ObservableObject {
         phase = .repairing
         let before = output
         output = ""
-        lastGood = (before, history)
+        lastGood = (before, history, lint, critique)
 
         task = Task {
             do {
@@ -325,7 +338,7 @@ final class ImproverViewModel: ObservableObject {
     func refine() {
         let instr = refineText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !instr.isEmpty, !output.isEmpty, phase == .done, let engine else { return }
-        lastGood = (output, history)
+        lastGood = (output, history, lint, critique)
         history += [.assistant(output), .user(MetaPrompts.refineInstruction(instr))]
         refineText = ""
         task?.cancel()
@@ -363,7 +376,11 @@ final class ImproverViewModel: ObservableObject {
     func cancel() {
         task?.cancel()
         runID += 1
-        restoreAfterInterruptedRefine()
+        // Same rule as `fail`: a restored prompt is a result, a half-streamed fragment is not.
+        // Without this, stopping mid-write left a sentence behind an enabled Copy button with no
+        // structure score, which reads as a finished prompt.
+        let restored = restoreAfterInterruptedRefine()
+        if !restored { output = "" }
         phase = output.isEmpty ? .idle : .done
         if output.isEmpty { expanded = false }
     }
@@ -399,7 +416,9 @@ final class ImproverViewModel: ObservableObject {
     /// Errors raised outside a run (model list refresh) must not overwrite a run's own error banner,
     /// and must not leave a stale one behind when the next run starts.
     func reportBackground(_ message: String) {
-        guard !isBusy, error == nil else { return }
+        // A background failure (a model-list refresh) must not overwrite the banner of a run that
+        // is in flight or waiting for answers.
+        guard !ownsErrorBanner, error == nil else { return }
         error = message
     }
 
@@ -426,23 +445,32 @@ final class ImproverViewModel: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
-    private func restoreAfterInterruptedRefine() {
-        if let good = lastGood {
-            output = good.output
-            history = good.history
-            lastGood = nil
-        }
+    /// Puts the pre-refine result back. Returns whether anything was restored, so the caller can
+    /// tell "a good prompt came back" from "the stream died mid-write" — the two need opposite
+    /// treatment, and conflating them destroyed the user's prompt.
+    @discardableResult
+    private func restoreAfterInterruptedRefine() -> Bool {
+        guard let good = lastGood else { return false }
+        output = good.output
+        history = good.history
+        lint = good.lint
+        critique = good.critique
+        lastGood = nil
+        return true
     }
 
     private func fail(_ err: Error, run: Int) {
         guard run == runID else { return }
         if err is CancellationError || (err as? URLError)?.code == .cancelled { return }
         error = err.localizedDescription
-        restoreAfterInterruptedRefine()
-        // A stream that died mid-write leaves a sentence, not a prompt. Keeping it would put
-        // unvalidated text behind an enabled Copy button with no structure score, which reads as
-        // success. The prefix stays on screen so the failure is visible, but it is not a result.
-        if lint == nil || phase == .generating || phase == .repairing {
+        // Restore first, then decide. A restored prompt is a real result and must survive; only
+        // text that arrived during a failed stream is a fragment. Testing the phase wiped the
+        // prompt that had just been put back, because refine and repair are exactly the phases
+        // that set `lastGood`.
+        let restored = restoreAfterInterruptedRefine()
+        if !restored {
+            // A stream that died mid-write leaves a sentence, not a prompt. Keeping it would put
+            // unvalidated text behind an enabled Copy button with no structure score.
             output = ""
         }
         phase = output.isEmpty ? .idle : .done

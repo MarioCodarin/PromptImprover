@@ -63,6 +63,13 @@ struct QualityPanel: View {
         VStack(alignment: .leading, spacing: 6) {
             if let c = vm.critique {
                 ScoreRow(label: "Rubric", value: c.total(for: vm.runTarget), suffix: "/100")
+                // A missing axis silently scores the generic 2, so the number above is part
+                // assumption. Naming them is the difference between a score and a guess.
+                let absent = c.missingAxes(for: vm.runTarget)
+                if !absent.isEmpty {
+                    Text("Scored without: " + absent.map(\.rawValue).joined(separator: ", "))
+                        .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                }
             }
             if let l = vm.lint {
                 ScoreRow(label: "Structure", value: l.score, suffix: "/100")

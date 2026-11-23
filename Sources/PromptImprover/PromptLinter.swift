@@ -25,6 +25,49 @@ enum PromptLinter {
         var title: String
         var detail: String
         var fix: String
+
+        /// Which rubric axis this check defends, so a lint-driven repair can tell the model what
+        /// the issue is about. Derived from the check id rather than stored, because a check can
+        /// be renamed without every construction site having to remember this table.
+        var axis: String {
+            if id.hasPrefix("section:") {
+                switch id.dropFirst("section:".count) {
+                case "objective", "purpose": return "goal"
+                case "context": return "context"
+                case "inputs": return "inputs"
+                case "output": return "deliverable"
+                case "criteria": return "criteria"
+                case "constraints": return "constraints"
+                case "approach": return "procedure"
+                case "autonomy": return "autonomy"
+                case "verification": return "verification"
+                case "assumptions": return "robustness"
+                default: return "consistency"
+                }
+            }
+            switch id {
+            case "limit-conflict", "format-conflict": return "consistency"
+            case "vague-criteria": return "criteria"
+            case "placeholders": return "deliverable"
+            case "shouting", "meta", "preamble", "executed", "no-fence", "no-headings": return "economy"
+            case "bounded-effort", "vague-verb": return "constraints"
+            case "silent-defaults": return "robustness"
+            default: return "consistency"
+            }
+        }
+
+        /// The same issue in the shape the repair stage already consumes. The linter has no
+        /// quote, so the title and detail carry the problem instead.
+        var asCritiqueIssue: CritiqueIssue {
+            let mapped: Defect.Severity
+            switch severity {
+            case .blocker: mapped = .blocker
+            case .major: mapped = .major
+            case .minor: mapped = .minor
+            }
+            return CritiqueIssue(axis: axis, severity: mapped, quote: "",
+                                 problem: "\(title): \(detail)", fix: fix)
+        }
     }
 
     struct Report {
@@ -151,9 +194,15 @@ enum PromptLinter {
         check("criteria-measurable") {
             let body = sectionBody(lines, matching: ["success", "acceptance", "done", "criteria", "definition of done", "quality"])
             guard !body.isEmpty else { return nil }   // absence is already a blocker above
+            // A human reviewer is a legitimate instrument. "A colleague who has not seen the page
+            // can name which plan suits a two-person team" is checkable by exactly the person the
+            // criterion names, and rejecting it pushed prompts toward fake automation.
             let measurable = ["pass", "return", "contain", "equal", "match", "at least", "no more than",
                               "within", "under ", "≤", "≥", "%", "command", "test", "field", "verify",
-                              "check", "exit code", "grep", "diff", "count"]
+                              "check", "exit code", "grep", "diff", "count",
+                              "can name", "can tell", "can state", "can point", "can identify",
+                              "can answer", "a reader", "a colleague", "a reviewer", "someone who",
+                              "without asking", "unprompted", "in one read", "two readers"]
             // A digit only counts as a measurement if it is part of a number, not an ordered-list
             // marker: "1. It should be high quality" used to satisfy this check.
             let hasNumber = body.split(whereSeparator: \.isWhitespace).contains { token in
@@ -275,8 +324,13 @@ enum PromptLinter {
                     if t.lowercased().hasPrefix("assumption") {
                         capturing = true
                         // A label ending in ":" may carry its first entry on the same line.
+                        // A label that ends in ":" may carry its first entry on the same line, but
+                        // a parenthetical after the colon is part of the label, not an entry.
                         let tail = t.drop(while: { $0 != ":" }).dropFirst()
-                        if !tail.trimmingCharacters(in: .whitespaces).isEmpty { collected.append("- " + tail) }
+                            .trimmingCharacters(in: .whitespaces)
+                        if !tail.isEmpty, tail.first != "(", tail.first != "\u{2014}", tail.first != "-" {
+                            collected.append("- " + tail)
+                        }
                         continue
                     }
                     if capturing {
@@ -292,11 +346,10 @@ enum PromptLinter {
             let entries = bulletCount(body) >= proseEntries ? bulletCount(body) : proseEntries
             // The heading establishes the semantics; the count establishes the volume. Requiring
             // the literal word "assume" inside an Assumptions section tested nothing.
-            // An inline sentence can record several decisions: count its clauses.
-            let inlineClauses = lines.filter { $0.lowercased().hasPrefix("assumption") }
-                .map { $0.split(separator: ";").count }
-                .max() ?? 0
-            let hasSection = max(entries, inlineClauses) >= unansweredQuestions
+            // Presence, not parity. One recorded decision can answer two questions, and a string
+            // test cannot map questions to decisions — demanding one bullet per question failed
+            // correct prompts. Whether the decisions actually cover the gaps is the critic's job.
+            let hasSection = entries >= 1
             // Recorded inline instead of in a section: only unambiguous phrasing counts.
             // A chat message has no headings, so its recorded decisions appear as an inline clause:
             // "Assumptions: a neutral relationship; …". That is the correct form for prose.
@@ -339,6 +392,11 @@ enum PromptLinter {
             }
             let declared = formats.filter(declares)
             guard declared.count > 1 else { return nil }
+            // "The record in Markdown, and a JSON summary alongside it" is one contract with two
+            // deliverables, not a contradiction. A conflict is two formats for the same output.
+            let artefactWords = ["alongside", "along with", "as well as", "in addition",
+                                 "separately", "second file", "another file", "plus a"]
+            if artefactWords.contains(where: { lower.contains($0) }) { return nil }
             return Issue(id: "format-conflict", severity: .major, title: "Conflicting output formats",
                          detail: "Declares \(declared.joined(separator: ", ")) without an either/or.",
                          fix: "Pick one format, or state which conditions choose between them.")
@@ -353,11 +411,18 @@ enum PromptLinter {
             let lowerBound = ["min", "minimum", "at least", "no fewer than", "fewer than", "over", "above", "≥", "from"]
             let upperBound = ["max", "maximum", "under", "at most", "no more than", "below", "limit", "≤", "up to"]
             let anyBound = lowerBound + upperBound + ["between", "roughly", "about", "around", "approx"]
+            // Two parts of one deliverable may each carry a budget: "the summary at least 300
+            // words; the appendix at most 200". The comment above claimed this was scoped to the
+            // whole deliverable, but the loop scanned every line unscoped and failed correct prompts.
+            let partWords = ["summary", "appendix", "section", "introduction", "conclusion",
+                             "abstract", "executive", "chapter", "each", "per ", "for the ",
+                             "body", "title", "caption", "description", "paragraph "]
             for unit in globalUnits {
                 var lows: [Int] = [], highs: [Int] = []
                 for line in lines {
                     let lowerLine = line.lowercased()
                     guard anyBound.contains(where: { lowerLine.contains($0) }) else { continue }
+                    if partWords.contains(where: { lowerLine.contains($0) }) { continue }
                     // "1,000 words" is one thousand, not zero.
                     let cleaned = lowerLine.replacingOccurrences(of: ",", with: "")
                     let tokens = cleaned.split(whereSeparator: { !($0.isLetter || $0.isNumber) }).map(String.init)
@@ -516,15 +581,21 @@ enum PromptLinter {
             // line *is* the objective, and every keyword test for it flagged correct messages
             // ("Write a resignation email that…" contains none of the words). Length, output
             // contract, filler and limit checks carry the rest.
-            return [("output contract", ["format", "return", "respond", "output", "write", "produce",
-                                         "give me", "reply", "answer", "draft", "sentence", "paragraph"])]
+            // A verb is not a contract: "Can you write something that fixes it?" contains "write"
+            // and constrains nothing. What pins a chat message's output is a length bound or an
+            // explicit exclusion, so those are what this requires.
+            return [("output contract", ["words", "sentences", "paragraphs", "bullets", "lines",
+                                         "no preamble", "no sign-off", "no closing",
+                                         "do not include", "don't include", "without",
+                                         "exclude", "avoid", "at most", "at least",
+                                         "one paragraph", "plain prose", "a numbered list"])]
         }
     }
 
     private static func lengthBounds(for target: PromptTarget) -> (min: Int, max: Int) {
         switch target {
-        case .agentTask: return (120, 1400)
-        case .systemPrompt: return (90, 1100)
+        case .agentTask: return (60, 1400)
+        case .systemPrompt: return (50, 1100)
         case .chat: return (30, 500)
         }
     }

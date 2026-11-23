@@ -21,6 +21,24 @@ struct PromptImproverApp: App {
             exit(SelfTest.lintFile(args[i + 1], target: target, unanswered: unanswered))
         }
         if args.contains("--dump-prompts") { SelfTest.dumpPrompts(); exit(0) }
+        if let i = args.firstIndex(of: "--vm") {
+            guard let c = VMProbe.parse(Array(args[i...])) else {
+                FileHandle.standardError.write(Data("usage: PromptImprover --vm <baseURL> [--key K] [--model M] [--rigor Fast|Standard|Deep]\n".utf8))
+                exit(64)
+            }
+            // The probe drives @MainActor state, so the task must start on the main actor and the
+            // runloop must keep pumping until it finishes.
+            var code: Int32 = 70
+            let done = DispatchSemaphore(value: 0)
+            Task { @MainActor in
+                code = await VMProbe.run(base: c.base, key: c.key, model: c.model, rigor: c.rigor)
+                done.signal()
+            }
+            while done.wait(timeout: .now()) == .timedOut {
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+            }
+            exit(code)
+        }
         if let i = args.firstIndex(of: "--e2e") {
             guard let config = E2E.parse(Array(args[i...])) else {
                 FileHandle.standardError.write(Data("usage: PromptImprover --e2e <baseURL> [--key K] [--model M] [--format openai|anthropic] [--draft TEXT] [--target \"Agent task\"] [--rigor Fast|Standard|Deep] [--out FILE] [--json]\n".utf8))

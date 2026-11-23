@@ -103,7 +103,8 @@ private struct ModelMenu: View {
                 guard let e = store.selected else { return }
                 Task {
                     do { try await store.refreshModels(e) }
-                    catch { vm.error = "Couldn't load models: \(error.localizedDescription)" }
+                    // A background failure must not clobber a run's own error banner.
+                    catch { vm.reportBackground("Couldn't load models: \(error.localizedDescription)") }
                 }
             }
         } label: {
