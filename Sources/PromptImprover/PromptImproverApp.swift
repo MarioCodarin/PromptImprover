@@ -8,11 +8,35 @@ struct PromptImproverApp: App {
     @StateObject private var profiles = ProfileStore()
 
     init() {
-        // Build-time hook: `PromptImprover --render-icon <dir.iconset>` renders the logo and exits.
+        // Build-time and diagnostic hooks. All of these exit before any UI is created.
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--render-icon"), i + 1 < args.count {
             IconRenderer.render(iconset: args[i + 1])
             exit(0)
+        }
+        if args.contains("--selftest") { exit(SelfTest.run()) }
+        if let i = args.firstIndex(of: "--lint"), i + 1 < args.count {
+            let target = args.firstIndex(of: "--target").flatMap { $0 + 1 < args.count ? PromptTarget(rawValue: args[$0 + 1]) : nil } ?? .agentTask
+            let unanswered = args.firstIndex(of: "--unanswered").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil } ?? 0
+            exit(SelfTest.lintFile(args[i + 1], target: target, unanswered: unanswered))
+        }
+        if args.contains("--dump-prompts") { SelfTest.dumpPrompts(); exit(0) }
+        if let i = args.firstIndex(of: "--e2e") {
+            guard let config = E2E.parse(Array(args[i...])) else {
+                FileHandle.standardError.write(Data("usage: PromptImprover --e2e <baseURL> [--key K] [--model M] [--format openai|anthropic] [--draft TEXT] [--target \"Agent task\"] [--rigor Fast|Standard|Deep] [--out FILE] [--json]\n".utf8))
+                exit(64)
+            }
+            // No UI exists yet at this point, so pump the runloop while the async run completes.
+            var code: Int32 = 70
+            let done = DispatchSemaphore(value: 0)
+            Task.detached {
+                code = await E2E.run(config)
+                done.signal()
+            }
+            while done.wait(timeout: .now()) == .timedOut {
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+            }
+            exit(code)
         }
         LoginItem.enableOnFirstLaunch()
     }
@@ -30,7 +54,7 @@ struct PromptImproverApp: App {
         .menuBarExtraStyle(.window)
 
         Settings {
-            SettingsView().environmentObject(store).environmentObject(profiles)
+            SettingsView().environmentObject(store).environmentObject(profiles).environmentObject(vm)
         }
     }
 }

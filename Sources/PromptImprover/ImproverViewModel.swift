@@ -1,13 +1,38 @@
 import Foundation
 import AppKit
 
+/// Drives the five-stage pipeline: diagnose → write → lint → verify → repair (+ tests).
+///
+/// The view model owns interaction (questions, partial text, cancel); `PromptEngine` owns the model
+/// calls. Two invariants keep the state honest:
+/// 1. `runID` is bumped on every start/cancel, and every stage checks it before writing state, so a
+///    cancelled stream (which ends quietly, without throwing) can never overwrite a newer run.
+/// 2. The writer's output is never trusted on its own: the deterministic linter and the critic both
+///    have to pass, and a failing verdict triggers a repair pass — with the original kept if the
+///    repair scores worse structurally than what it replaced.
 @MainActor
 final class ImproverViewModel: ObservableObject {
-    enum Phase: Equatable { case idle, analyzing, answering, generating, done }
+    enum Phase: Equatable {
+        case idle, analyzing, answering, generating, verifying, repairing, testing, done
+
+        var label: String {
+            switch self {
+            case .idle: return ""
+            case .analyzing: return "Reading your draft…"
+            case .answering: return "A few questions first"
+            case .generating: return "Writing the prompt…"
+            case .verifying: return "Checking it against the rubric…"
+            case .repairing: return "Fixing what the check found…"
+            case .testing: return "Writing acceptance tests…"
+            case .done: return ""
+            }
+        }
+    }
 
     @Published var draft = ""
     @Published var target: PromptTarget = .agentTask
     @Published var askQuestions = true
+    @Published var rigor: Rigor = .standard { didSet { UserDefaults.standard.set(rigor.rawValue, forKey: Self.rigorKey) } }
 
     @Published var phase: Phase = .idle
     @Published var analysis = ""
@@ -18,104 +43,322 @@ final class ImproverViewModel: ObservableObject {
     @Published var copied = false
     @Published var expanded = false
     @Published var rated: Bool? = nil   // nil = not rated yet for the current output
+
+    /// Evidence behind the prompt, shown in the quality panel.
+    @Published var diagnosis: Diagnosis?
+    @Published var critique: Critique?
+    @Published var lint: PromptLinter.Report?
+    @Published var evalSuite: EvalSuite?
+    /// The target this run was started with. Scoring must use this, not `target`, which the menu
+    /// can change mid-run: a prompt written for an agent task must not be judged as a chat message.
+    private(set) var runTarget: PromptTarget = .agentTask
+
+    /// Whether a repair pass was applied or attempted-and-reverted. The panel has to say which,
+    /// because a "repair" verdict with no note reads as a repair that is still coming.
+    @Published var repairOutcome: RepairOutcome = .none
+    @Published var calls = 0
+    @Published var elapsed: TimeInterval = 0
+    @Published var tokensIn = 0
+    @Published var tokensOut = 0
+
     var didAutoFetch = false
 
+    enum RepairOutcome: Equatable {
+        case none, applied, reverted
+    }
+
+    static let rigorKey = "improver.rigor"
+
+    init() {
+        if let s = UserDefaults.standard.string(forKey: Self.rigorKey), let r = Rigor(rawValue: s) { rigor = r }
+    }
+
+    private var engine: PromptEngine?
     private var client: LLMClient?
-    private var model = ""
-    private var profileContext: String?
     private var history: [ChatMessage] = []
     private var task: Task<Void, Never>?
 
-    /// Bumped on every start/cancel. A task only writes state while its own run is still current,
-    /// so a cancelled stream (which ends quietly, without throwing) can never overwrite newer state.
+    /// Bumped on every start/cancel. A task only writes state while its own run is still current.
     private var runID = 0
     /// Last good result, restored if a refine fails or is stopped.
     private var lastGood: (output: String, history: [ChatMessage])?
+    private var startedAt = Date()
 
-    var isBusy: Bool { phase == .analyzing || phase == .generating }
+    var isBusy: Bool { [.analyzing, .generating, .verifying, .repairing, .testing].contains(phase) }
+    var canRefine: Bool { phase == .done && !output.isEmpty }
+
+    /// One line for the panel: what the pipeline did, in numbers.
+    var qualityLine: String? {
+        guard let lint else { return nil }
+        var parts: [String] = []
+        if let critique { parts.append("rubric \(critique.total(for: runTarget))/100") }
+        parts.append("structure \(lint.score)/100")
+        if let suite = evalSuite, !suite.cases.isEmpty { parts.append("\(suite.cases.count) tests") }
+        return parts.joined(separator: " · ")
+    }
+
+    // MARK: - Lifecycle
 
     func start(store: EndpointStore, profile: ProfileStore) {
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard let e = store.selected else { return }
         guard store.hasKey(e), let key = store.apiKey(for: e) else { error = LLMError.missingKey.errorDescription; return }
         guard let m = e.selectedModel ?? e.models.first else { error = "Pick a model first."; return }
+        begin(client: LLMClient(endpoint: e, apiKey: key), model: m, profile: profile.contextBlock())
+    }
 
+    /// Shared entry point for the UI and the headless `--e2e` runner.
+    func begin(client: LLMClient, model: String, profile: String?) {
         task?.cancel()
         runID += 1
-        let client = LLMClient(endpoint: e, apiKey: key)
         self.client = client
-        profileContext = profile.contextBlock()
-        model = m
+        runTarget = target
+        engine = PromptEngine(client: client, model: model, target: target,
+                              profile: profile, draft: draft)
         error = nil; analysis = ""; questions = []; output = ""; history = []; lastGood = nil; expanded = false
+        diagnosis = nil; critique = nil; lint = nil; evalSuite = nil; calls = 0
+        repairOutcome = .none
+        tokensIn = 0; tokensOut = 0
+        startedAt = Date(); elapsed = 0
 
-        guard askQuestions else { generate(); return }
+        guard rigor.verifies, askQuestions else { runWriter(); return }
+        analyze()
+    }
 
+    /// Stage 1. Cheap, and it decides both the questions and the writer's defect list.
+    private func analyze() {
+        guard let engine else { return }
         phase = .analyzing
         let run = runID
-        let system = MetaPrompts.personalize(MetaPrompts.analyzer, profile: profileContext)
-        let input = MetaPrompts.analyzerInput(draft, target: target)
+
         task = Task {
             do {
-                let raw = try await client.complete(system: system, messages: [.user(input)], model: m)
+                let d = try await engine.diagnose()
                 guard run == runID, !Task.isCancelled else { return }
-                let (a, qs) = MetaPrompts.parseAnalysis(raw)
-                analysis = a
-                questions = qs
-                if qs.isEmpty { generate() } else { phase = .answering }
+                calls += 1
+                diagnosis = d
+                analysis = render(d)
+                questions = d.questions
+                if d.questions.isEmpty { runWriter() } else { phase = .answering }
             } catch { fail(error, run: run) }
         }
     }
 
     func generate() {
-        let brief = MetaPrompts.composeBrief(draft: draft, analysis: analysis, questions: questions)
-        history = [.user(brief)]
-        lastGood = nil
+        guard phase == .answering || phase == .analyzing else { return }
         runWriter()
     }
 
-    /// Skip means skip: half-typed answers are not sent.
+    /// Skip means skip: half-typed answers are not sent, and the writer records its own defaults.
     func skipQuestions() {
+        guard phase == .answering || phase == .analyzing else { return }
         for i in questions.indices { questions[i].answer = "" }
-        generate()
-    }
-
-    func refine() {
-        let instr = refineText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !instr.isEmpty, !output.isEmpty, phase == .done else { return }
-        lastGood = (output, history)
-        history += [.assistant(output),
-                    .user("Revise the prompt: \(instr)\nReturn the full revised prompt only.")]
-        refineText = ""
         runWriter()
     }
 
+    /// Stage 2. Streams, so the panel fills as the prompt is written.
     private func runWriter() {
-        guard let client else { return }
+        guard let engine else { return }
         task?.cancel()
         runID += 1
         let run = runID
         phase = .generating
         output = ""
         rated = nil
-        let system = MetaPrompts.personalize(MetaPrompts.writer(target: target), profile: profileContext)
-        let msgs = history, model = model
+
+        let brief = MetaPrompts.composeBrief(draft: draft, diagnosis: diagnosis ?? Diagnosis(), questions: questions)
+        history = [.user(brief)]
+
         task = Task {
             do {
-                var raw = ""
-                for try await chunk in client.stream(system: system, messages: msgs, model: model) {
+                var last = ""
+                for try await partial in engine.write(brief: brief) {
                     guard run == runID else { return }
-                    raw += chunk
-                    output = MetaPrompts.stripThinking(raw)
+                    last = partial
+                    output = partial
                 }
                 guard run == runID, !Task.isCancelled else { return }
-                let final = MetaPrompts.unfence(MetaPrompts.stripThinking(raw))
-                if final.isEmpty { throw LLMError.api("The model returned an empty response.") }
+                calls += 1
+                let final = PromptEngine.finalize(last)
+                guard !final.isEmpty else { throw LLMError.api("The model returned an empty response.") }
                 output = final
-                lastGood = nil
-                phase = .done
+                afterWrite(run: run)
             } catch { fail(error, run: run) }
         }
     }
+
+    /// Lint, then decide whether the model-level check is worth its call.
+    private func afterWrite(run: Int) {
+        guard run == runID else { return }
+        lint = PromptLinter.lint(output, target: runTarget, unansweredQuestions: unansweredCount(), draft: draft)
+        guard rigor.verifies else { finish(); return }
+        verify()
+    }
+
+    /// Stage 3. An independent reviewer scores the prompt against the same rubric the writer was given.
+    private func verify() {
+        guard let engine else { return }
+        phase = .verifying
+        let run = runID
+
+        task = Task {
+            do {
+                let c = try await engine.verify(prompt: output)
+                guard run == runID, !Task.isCancelled else { return }
+                calls += 1
+                guard let c else { nextAfterVerify(); return }
+                critique = c
+                // No quoted issues means nothing to fix: an empty repair pass costs a call and a
+                // re-check and returns the prompt unchanged.
+                if c.needsRepair, !c.issues.isEmpty { repair(c) } else { nextAfterVerify() }
+            } catch { fail(error, run: run) }
+        }
+    }
+
+    private func nextAfterVerify() {
+        if rigor.writesTests { writeTests() } else { finish() }
+    }
+
+    /// Stage 4. Only the issues the critic could quote, and only when one is worth fixing.
+    private func repair(_ c: Critique) {
+        guard let engine else { return }
+        task?.cancel()
+        runID += 1
+        let run = runID
+        phase = .repairing
+        let before = output
+        output = ""
+        lastGood = (before, history)
+
+        task = Task {
+            do {
+                var last = ""
+                for try await partial in engine.repair(prompt: before, issues: c.issues) {
+                    guard run == runID else { return }
+                    last = partial
+                    output = partial
+                }
+                guard run == runID, !Task.isCancelled else { return }
+                calls += 1
+                let revised = PromptEngine.finalize(last)
+                // A repair that scores worse structurally is a regression: keep the original.
+                let beforeReport = PromptLinter.lint(before, target: runTarget,
+                                                     unansweredQuestions: unansweredCount(), draft: draft)
+                let afterReport = PromptLinter.lint(revised, target: runTarget,
+                                                    unansweredQuestions: unansweredCount(), draft: draft)
+                if revised.isEmpty || afterReport.score < beforeReport.score {
+                    output = before
+                    lint = beforeReport
+                    repairOutcome = .reverted
+                    lastGood = nil
+                    nextAfterVerify()
+                } else {
+                    repairOutcome = .applied
+                    output = revised
+                    lint = afterReport
+                    lastGood = nil
+                    // The critique on screen describes the pre-repair prompt. Re-score the shipped one,
+                    // once, so the number in the panel is a claim about what the user actually copies.
+                    reverify()
+                }
+            } catch { fail(error, run: run) }
+        }
+    }
+
+    /// One bounded re-check after a repair. No second repair pass: the loop has to end somewhere.
+    private func reverify() {
+        guard let engine else { nextAfterVerify(); return }
+        phase = .verifying
+        let run = runID
+        let repaired = output
+
+        task = Task {
+            do {
+                let c = try await engine.verify(prompt: repaired)
+                guard run == runID, !Task.isCancelled else { return }
+                calls += 1
+                if let c, output == repaired { critique = c }
+                nextAfterVerify()
+            } catch {
+                // Losing the re-check is not losing the prompt: keep the repaired text, drop the stale score.
+                guard run == runID else { return }
+                critique = nil
+                nextAfterVerify()
+            }
+        }
+    }
+
+    /// Stage 5 (deep only). Tests the user can run before trusting the prompt.
+    private func writeTests() {
+        guard let engine else { finish(); return }
+        phase = .testing
+        let run = runID
+
+        task = Task {
+            do {
+                let suite = try await engine.tests(prompt: output)
+                guard run == runID, !Task.isCancelled else { return }
+                calls += 1
+                evalSuite = suite
+                finish()
+            } catch {
+                // Tests are a bonus. Losing them must not lose the prompt.
+                guard run == runID else { return }
+                evalSuite = nil
+                finish()
+            }
+        }
+    }
+
+    private func finish() {
+        lastGood = nil
+        elapsed = Date().timeIntervalSince(startedAt)
+        if let usage = client?.usage {
+            tokensIn = usage.inputTokens
+            tokensOut = usage.outputTokens
+        }
+        phase = .done
+    }
+
+    // MARK: - Refine
+
+    func refine() {
+        let instr = refineText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instr.isEmpty, !output.isEmpty, phase == .done, let engine else { return }
+        lastGood = (output, history)
+        history += [.assistant(output), .user(MetaPrompts.refineInstruction(instr))]
+        refineText = ""
+        task?.cancel()
+        runID += 1
+        let run = runID
+        phase = .generating
+        output = ""
+        rated = nil
+
+        let msgs = history
+        task = Task {
+            do {
+                var last = ""
+                for try await partial in engine.revise(history: msgs) {
+                    guard run == runID else { return }
+                    last = partial
+                    output = partial
+                }
+                guard run == runID, !Task.isCancelled else { return }
+                calls += 1
+                let final = PromptEngine.finalize(last)
+                guard !final.isEmpty else { throw LLMError.api("The model returned an empty response.") }
+                output = final
+                lint = PromptLinter.lint(final, target: runTarget, unansweredQuestions: unansweredCount(), draft: draft)
+                critique = nil
+                evalSuite = nil
+                repairOutcome = .none
+                finish()
+            } catch { fail(error, run: run) }
+        }
+    }
+
+    // MARK: - Commands
 
     func cancel() {
         task?.cancel()
@@ -129,6 +372,8 @@ final class ImproverViewModel: ObservableObject {
         cancel()
         draft = ""; analysis = ""; questions = []; output = ""; error = nil
         phase = .idle; expanded = false; lastGood = nil; history = []
+        diagnosis = nil; critique = nil; lint = nil; evalSuite = nil; calls = 0; elapsed = 0
+        tokensIn = 0; tokensOut = 0; repairOutcome = .none; rated = nil; copied = false
     }
 
     func rate(positive: Bool, tags: [String], profile: ProfileStore) {
@@ -141,6 +386,44 @@ final class ImproverViewModel: ObservableObject {
         NSPasteboard.general.setString(output, forType: .string)
         copied = true
         Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+    }
+
+    func copyTests() {
+        guard let suite = evalSuite else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(suite.markdown, forType: .string)
+        copied = true
+        Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+    }
+
+    /// Errors raised outside a run (model list refresh) must not overwrite a run's own error banner,
+    /// and must not leave a stale one behind when the next run starts.
+    func reportBackground(_ message: String) {
+        guard !isBusy, error == nil else { return }
+        error = message
+    }
+
+    // MARK: - Helpers
+
+    private func unansweredCount() -> Int {
+        questions.filter { $0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+    }
+
+    private func render(_ d: Diagnosis) -> String {
+        var lines: [String] = []
+        if !d.brief.isEmpty { lines.append(d.brief) }
+        if !d.findings.isEmpty {
+            lines.append("")
+            for f in d.findings {
+                let quote = f.quote.isEmpty ? "" : " — \u{201C}\(f.quote.prefix(70))\u{201D}"
+                lines.append("• \(f.code) \(f.title)\(quote)")
+            }
+        }
+        if !d.assumptions.isEmpty {
+            lines.append("")
+            lines.append("Defaults it would assume: " + d.assumptions.joined(separator: "; "))
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func restoreAfterInterruptedRefine() {
@@ -156,6 +439,12 @@ final class ImproverViewModel: ObservableObject {
         if err is CancellationError || (err as? URLError)?.code == .cancelled { return }
         error = err.localizedDescription
         restoreAfterInterruptedRefine()
+        // A stream that died mid-write leaves a sentence, not a prompt. Keeping it would put
+        // unvalidated text behind an enabled Copy button with no structure score, which reads as
+        // success. The prefix stays on screen so the failure is visible, but it is not a result.
+        if lint == nil || phase == .generating || phase == .repairing {
+            output = ""
+        }
         phase = output.isEmpty ? .idle : .done
     }
 }

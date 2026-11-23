@@ -6,148 +6,569 @@ enum PromptTarget: String, CaseIterable, Identifiable {
     case chat = "Chat message"
     var id: String { rawValue }
 
+    /// What the writer must know about the medium it is writing for.
     var guidance: String {
         switch self {
         case .agentTask:
             return """
-            TARGET: an autonomous agent running in a harness with tools (e.g. Claude Code, Codex, OpenCode, \
-            a custom agent loop). Address the agent in second person. In addition to the core sections, cover:
-            - Autonomy: what it may decide on its own, and the few situations where it must stop and ask \
-            (irreversible, destructive, costly or outward-facing actions; genuinely ambiguous goals).
-            - Persistence: keep working until the success criteria are met; don't stop at a plan unless a plan is the deliverable.
-            - Uncertainty: when a detail is missing, make the most reasonable assumption, note it, and continue.
-            - Tools & sources, only where relevant (e.g. search the web and cite sources, prefer primary sources).
-            - Verification: check the result against the success criteria before finishing.
-            - Final report: what was done, how it was verified, open issues, assumptions made.
+            TARGET: an autonomous agent in a harness with tools (Claude Code, Codex, OpenCode, a custom loop).
+            Address it in second person. It will run unattended, so it needs:
+            - Autonomy: act by default. Name the action classes that need confirmation first — destructive, \
+            irreversible, visible to others, costly — and say why, instead of a blanket "ask if unsure".
+            - Persistence: finish the work, not the plan. If the task is large, decompose it and confirm each \
+            sub-request is complete before yielding.
+            - Escalation: when a requirement conflicts with what it finds on the ground, report the conflict \
+            and the reading it chose. Obstacles never justify destructive shortcuts.
+            - Verification: a named check per success criterion, and the evidence to show for it.
+            - Final report: what changed, how it was verified, what is still open, which assumptions it made.
             """
         case .systemPrompt:
             return """
-            TARGET: a reusable system prompt that governs many future conversations. Describe the assistant's \
-            purpose, audience, core behaviors, priorities when instructions conflict, tone, default formatting, \
-            and how to handle ambiguous or out-of-scope requests. Do not tailor it to one single request.
+            TARGET: a reusable system prompt that governs every future conversation, not one request.
+            It needs: purpose and audience; how it works (priorities, decision rules); what it must never do \
+            and why; tone and default formatting; how it handles ambiguity, out-of-scope asks and conflicts \
+            between its own rules. Prefer durable principles over rules tied to one scenario. If two rules \
+            could ever conflict, say which wins.
             """
         case .chat:
             return """
-            TARGET: a single message pasted into a chat assistant. Keep it compact: goal, essential context, \
-            constraints, deliverable, success criteria. Skip agent-only sections (autonomy, reporting).
+            TARGET: one message pasted into a chat assistant. Compact prose or light structure — headings are \
+            optional, not required. It needs: the goal, only the context the model cannot infer, what the \
+            output must look like, and what "good" means. No autonomy, escalation, persistence or reporting \
+            sections: a chat turn is not an agent run. Aim for under 400 words.
+            """
+        }
+    }
+
+    /// Section skeleton the writer is told to adapt. Empty sections get dropped, not filled.
+    var skeleton: String {
+        switch self {
+        case .agentTask:
+            return """
+            ## Objective
+            ## Context
+            ## Inputs
+            ## Requirements
+            ## Constraints and non-goals
+            ## Approach
+            ## Output contract
+            ## Success criteria
+            ## Verification
+            ## Priorities when instructions conflict
+            ## Autonomy and escalation
+            ## Assumptions   (only when you had to choose something)
+            """
+        case .systemPrompt:
+            return """
+            ## Purpose
+            ## How you work
+            ## Priorities when instructions conflict
+            ## Output contract
+            ## Boundaries
+            ## Assumptions   (only when you had to choose something)
+            """
+        case .chat:
+            return """
+            ## Objective
+            ## Context        (only facts the model cannot infer)
+            ## What to produce
+            ## Constraints
+            ## Done when
             """
         }
     }
 }
 
+/// Every meta-prompt in the app. The rubric is rendered from `Axis` so the prompt and the UI can
+/// never disagree about what "good" means.
 enum MetaPrompts {
 
-    // MARK: Stage 1 — diagnose & decide what to ask
+    // MARK: - Shared blocks
 
-    static let analyzer = """
-    You are the diagnostic stage of a prompt-improvement tool. The user gives you a rough request they plan \
-    to hand to an AI model. You do not carry out the request and you do not write the improved prompt yet. \
-    Your only job is to work out what is missing.
+    /// The rubric, rendered for injection. Same anchors the critic scores against.
+    static func rubricBlock(for target: PromptTarget) -> String {
+        let axes = Axis.applicable(to: target)
+        let body = axes.map { axis in
+            """
+            - \(axis.rawValue) — \(axis.title). \(axis.question)
+              4: \(axis.anchor4)
+              2: \(axis.anchor2)
+              0: \(axis.anchor0)
+            """
+        }.joined(separator: "\n")
+        return """
+        <rubric>
+        Score each axis 0-4. These anchors are the only standard; do not invent a sixth axis.
 
-    Assess the draft on these dimensions:
-    - Goal: the outcome wanted, and why it matters.
-    - Done criteria: how anyone would know the result is good enough.
-    - Audience & context: who the output is for, and background the model cannot infer.
-    - Inputs: material, data or examples that exist, or that the model must find.
-    - Constraints: scope, length, tone, sources, things to avoid, deadlines.
-    - Deliverable: the exact form of the output.
-    - Autonomy: what the model may decide alone vs. when it should stop and ask.
-
-    Choose clarifying questions by these rules:
-    - Ask only when the answer would materially change the prompt AND no sensible default exists. \
-    If a reasonable default exists, don't ask. The writer will state it as an assumption.
-    - Ask at most 4 questions, most important first. Zero questions is the right answer when the draft is clear enough.
-    - Never ask about something the draft already states.
-    - Keep each question short, concrete and answerable in a few words. Offer 2–4 likely options when the answers are predictable.
-    - Treat the request as a general task. Don't assume a codebase, repository or files unless the draft mentions them.
-    - Write in the language of the draft.
-
-    Reply with JSON only. No prose, no code fences:
-    {"analysis": "<2–4 sentences: what the user wants and the draft's main weaknesses>",
-     "questions": [{"question": "...", "why": "<short clause: what the answer changes>", "options": ["...", "..."]}]}
-    """
-
-    static func analyzerInput(_ draft: String, target: PromptTarget) -> String {
-        "Intended use: \(target.rawValue)\n\n<draft>\n\(draft)\n</draft>"
+        \(body)
+        </rubric>
+        """
     }
 
-    // MARK: Stage 2 — write the prompt
+    static let defectBlock = """
+    <defect_codes>
+    Use these codes for findings. Do not invent codes.
+    \(Defect.all.map { "\($0.code) [\($0.severity.rawValue)] \($0.title)" }.joined(separator: "\n"))
+    </defect_codes>
+    """
+
+    // MARK: - Stage 1: diagnose
+
+    static func analyzer(target: PromptTarget) -> String {
+        """
+        You are the diagnostic stage of a prompt compiler. You receive a rough request that someone \
+        intends to hand to an AI model or agent. You work out what is missing before it is written.
+
+        You do not carry out the request. You do not write the prompt. Your output is a judgement plus \
+        a short list of questions.
+
+        \(rubricBlock(for: target))
+
+        \(defectBlock)
+
+        <how_to_judge>
+        - Score the draft as written, not the draft you would have written. A one-line request scores 0 or 1 \
+        on most axes; that is the correct answer, not a failure.
+        - A finding needs a quote from the draft. If you cannot quote it, it is not a finding.
+        - Severity: blocker = the result would be wrong or unusable; major = the result would need rework; \
+        minor = polish.
+        - Contradictions outrank vagueness. A prompt with two rules that cannot both be followed is worse \
+        than a vague one, because the executor burns effort reconciling them. Hunt for those pairs.
+        - Do not fault the draft for what its medium does not need. A chat message does not need autonomy \
+        rules; a system prompt does not need a file path.
+        - Reward what is already good. A draft that states its output format does not need a question \
+        about format.
+        </how_to_judge>
+
+        <how_to_ask>
+        - Ask only when the answer would change the prompt AND no defensible default exists. If a default \
+        exists, do not ask: say it in "assumptions" and let the writer record it.
+        - At most 4 questions, most consequential first. Zero is the right answer when the draft is clear.
+        - Never ask what the draft already states, and never ask what the user profile already answers.
+        - Each question is answerable in a few words, with 2-4 concrete options when the answers are \
+        predictable, plus the "default" you would choose if it goes unanswered.
+        - Never ask the user to do your job ("what should the success criteria be?"). Ask for the fact \
+        that determines it ("is this for an internal demo or a paying client?").
+        </how_to_ask>
+
+        <task_type>
+        Classify the request as one of: research, writing, code, analysis, design, planning, operations, \
+        other. Set "risk" to high when the work could touch money, personal data, production systems, \
+        legal exposure or anything visible to third parties; medium when it writes files or sends \
+        anything; low otherwise. The writer uses risk to decide how much escalation detail to include.
+        </task_type>
+
+        Write "brief", the analysis and the questions in the language of the draft.
+
+        Reply with JSON only. No prose, no code fence. Key order matters: findings before scores.
+        {
+          "brief": "2-4 sentences: what the user wants, and the two or three things that would most change the result",
+          "task_type": "research|writing|code|analysis|design|planning|operations|other",
+          "risk": "low|medium|high",
+          "findings": [
+            {"code": "D02", "severity": "blocker", "quote": "exact words from the draft", "fix": "what to add or change, one sentence"}
+          ],
+          "scores": {
+            "goal": {"note": "why this score, quoting or pointing at the draft", "score": 1}
+          },
+          "questions": [
+            {"question": "short, concrete", "why": "what the answer changes", "options": ["...", "..."], "default": "the answer you would assume"}
+          ],
+          "assumptions": ["defaults you would apply if the user says nothing"]
+        }
+        Include a score entry for every axis listed in the rubric.
+        """
+    }
+
+    static func analyzerInput(_ draft: String, target: PromptTarget) -> String {
+        """
+        Intended use: \(target.rawValue)
+
+        <draft>
+        \(draft)
+        </draft>
+        """
+    }
+
+    // MARK: - Stage 2: write
 
     static func writer(target: PromptTarget) -> String {
         """
-        You are an expert prompt engineer. You turn a rough request into a complete, well-structured prompt \
-        that a capable AI model or autonomous agent can carry out correctly on the first try. \
-        You write the prompt. You never perform the task yourself.
+        You are a prompt engineer. You compile a rough request into an executable specification: something \
+        a capable model or agent can carry out correctly on the first attempt, and that a second person \
+        could audit afterwards.
 
-        Principles (from current Anthropic, OpenAI and Google guidance on prompting frontier models and agents):
-        1. Start with the goal and the reason behind it. Models generalize better from a purpose than from bare rules.
-        2. Define "done" as concrete, checkable success criteria.
-        3. Give the context the model cannot infer: audience, background, prior decisions, definitions. \
-        Leave out what it already knows. Every line must earn its place.
-        4. Write at the right altitude: specific enough to steer, general enough to cover cases nobody foresaw. \
-        Prefer principles with reasons over long, brittle rule lists.
-        5. Say what to do, not only what to avoid. When a prohibition is necessary, give the reason and the alternative.
-        6. Make scope explicit: what is in, what is out, and what the model may decide alone.
-        7. Specify the deliverable exactly: format, structure, length, language, tone.
-        8. For multi-step work, describe the approach as phases (understand → plan → execute → verify → report) \
-        without micromanaging every step.
-        9. Add a short example only when a format or style is hard to describe in words, and label it as illustrative.
-        10. Never invent facts the user did not give (names, numbers, sources, URLs, credentials). When a detail \
-        is missing, choose a sensible default and list it under "Assumptions", or insert a {{PLACEHOLDER}}.
-        11. Keep every requirement the user stated, and write in the user's language.
-        12. No padding: no empty "world-class expert" personas, no ALL-CAPS shouting, no threats or bribes. \
-        Calm, direct language works best on current models.
-        13. The task is general-purpose. Don't assume a codebase, repository or files unless the user mentions them.
+        You write the prompt. You never do the task. If the request is "write a blog post", you do not \
+        write the post — you write the instructions that reliably produce a good one. Producing the \
+        deliverable yourself is the one failure this tool exists to prevent.
 
-        Structure: Markdown headings, with XML-style tags around any block of reference material or data. \
-        Adapt the sections to the task and drop any that would be empty. A typical skeleton:
+        <principles>
+        1. Intent before wording. State the outcome and why it matters. Models generalise from a purpose \
+        better than from a rule list, and a purpose is what lets them make the thousand small decisions \
+        you did not foresee.
+        2. Right altitude. Specific enough to steer, general enough to cover the cases nobody listed. \
+        Brittle if-else instructions and vague aspirations are the two failure modes; stay between them.
+        3. Every line earns its place. Context the model can infer is noise that costs attention. If a \
+        sentence could be deleted without changing the output, delete it.
+        4. Contradictions are the worst defect. Before you finish, list the rules that constrain the same \
+        action and check that no two disagree. When two legitimate goals conflict (speed vs thoroughness, \
+        autonomy vs safety), resolve it explicitly with a priority order instead of leaving both rules in.
+        5. Say what to do, not only what to avoid. A prohibition without an alternative just moves the \
+        failure. When a "never" is necessary, give the reason and the replacement behaviour.
+        6. Success criteria must be checkable by someone who did not do the work: a command, a field, a \
+        number, a comparison. "High quality" is not a criterion.
+        7. Verification is part of the task, not an afterthought. Say how to prove each criterion and what \
+        evidence to show. A result nobody checked is a guess.
+        8. Name the failure policy: missing input, ambiguous request, partial success, out-of-scope ask. \
+        Each gets a stated response, including when to stop and ask.
+        9. Autonomy is a decision, not a mood. Default to acting; list the action classes that need \
+        confirmation (destructive, irreversible, visible to others, costly) with the reason. Never let an \
+        obstacle justify a destructive shortcut.
+        10. Research, when the task needs facts the model cannot know (current prices, versions, law, \
+        APIs, competitors, anything dated): instruct a search, prefer primary sources, require a source \
+        and a retrieval date per claim, cross-check anything that decides the outcome, and separate what \
+        was confirmed from what was inferred. Never let the prompt imply a fact it did not supply.
+        11. Separate facts from design decisions. Never assert a fact about the world you were not \
+        given: prices, names, URLs, dates, counts, citations, testimonials, versions, availability. \
+        Limits and thresholds you impose on the work itself (word counts, file sizes, timeouts, \
+        thresholds, line budgets) are yours to choose — choose them deliberately, state the number, \
+        and list each one under Assumptions in one line. Anything a placeholder would leave unusable \
+        gets a marked placeholder instead: use {{LIKE THIS}} for a value only the user can supply.
+        12. No theatre. No "world-class expert" personas, no ALL-CAPS, no threats or bribes, no restating \
+        the request back. Calm, direct, reasoned language performs better on current models.
+        13. Do not tell a reasoning model to think step by step; it already reasons. Tell it what to reason \
+        about and what to show. Do not add chain-of-thought scaffolding to a chat prompt unless the task \
+        genuinely benefits from visible working.
+        14. One canonical example beats ten edge cases. Include an example only when a format or style is \
+        hard to describe in words, label it as illustrative, and keep it short.
+        15. The task is general. Do not assume a codebase, a repository, files, tools or an audience \
+        unless the request or the diagnosis supplies them.
+        </principles>
 
-        # <Task title>
-        ## Goal
-        ## Context
-        ## Requirements
-        ## Constraints & scope
-        ## Approach
-        ## Deliverable
-        ## Success criteria
-        ## Assumptions   (only if you made any)
+        <structure>
+        Markdown headings. Wrap any block of supplied material (documents, data, transcripts, code) in \
+        XML-style tags, and put long material before the instructions that use it — placement matters \
+        more than wording for long inputs.
+
+        Adapt this skeleton to the task and drop any section that would be empty. Never keep a heading \
+        just to have it.
+
+        \(target.skeleton)
 
         \(target.guidance)
+        </structure>
 
-        Output only the final prompt, ready to paste. No preamble, no commentary, no code fence around the whole thing.
+        <exemplar>
+        The example below shows the shape, not the content. Never reuse its subject, numbers or wording.
+
+        # Competitive teardown: three espresso machine vendors
+
+        ## Objective
+        Produce a decision memo that tells our hardware team which of three vendors (A, B, C) can supply a \
+        58mm portafilter machine at our target unit cost, and why. The team uses it to pick two vendors for \
+        sample orders on 12 May.
+
+        ## Context
+        We ship 400 units per quarter, need CE and WEEE certification, and cannot accept lead times over 10 \
+        weeks. The March attempt stalled because vendor pricing pages quote ex-works prices with no freight.
+
+        ## Inputs
+        - `vendors.csv` in the repository root: name, contact, quoted price, minimum order quantity.
+        - Spec sheets are not local. Fetch them from each vendor's site.
+
+        ## Requirements
+        - Per vendor: landed unit cost in EUR at 400 units, lead time in weeks, certifications held, and one \
+        sentence on the largest supply risk.
+        - When a figure is not published, say so. Do not estimate.
+
+        ## Constraints and non-goals
+        - Public information only; no outreach to vendors.
+        - Out of scope: negotiation strategy, payment terms.
+        - Budget: 90 minutes, 12 sources maximum.
+
+        ## Approach
+        1. Read `vendors.csv` and list what is missing per vendor.
+        2. Find each vendor's current spec sheet and price list. Prefer the PDF spec sheet over reseller pages.
+        3. Cross-check each price against a second source. If they differ by more than 10%, report both and \
+        mark the figure contested.
+        4. Write the memo.
+
+        ## Output contract
+        Markdown: one section per vendor, then a comparison table with the four numeric columns, then a \
+        two-sentence recommendation. 600 words maximum. English.
+
+        ## Success criteria
+        - Every price carries a source URL and a retrieval date.
+        - Every unpublished cell says "not published"; no estimates anywhere.
+        - Landed cost in the table equals the quoted price plus the freight figure cited.
+        - A reader can name the two recommended vendors without reading the prose.
+
+        ## Verification
+        Before finishing, re-read the memo and test each success criterion, naming the source behind each \
+        price. If one fails, fix it rather than noting it.
+
+        ## Autonomy and escalation
+        Proceed without asking. Stop and ask only if fewer than two vendors publish a spec sheet, or if a \
+        vendor requires an account to see pricing.
+
+        ## Assumptions
+        - "Landed cost" excludes VAT, because finance adds it downstream.
+        </exemplar>
+
+        <output>
+        Output the finished prompt and nothing else: no preamble, no commentary, no diff, no fence around \
+        the whole thing. Write it in the language of the request.
+        </output>
         """
     }
 
-    /// Builds the single user message sent to the writer from the draft + the Q&A round.
-    static func composeBrief(draft: String, analysis: String, questions: [ClarifyingQuestion]) -> String {
+    /// Builds the single user message for the writer from the draft, the diagnosis and the Q&A round.
+    static func composeBrief(draft: String, diagnosis: Diagnosis, questions: [ClarifyingQuestion]) -> String {
         var parts = ["<draft>\n\(draft)\n</draft>"]
-        if !analysis.isEmpty { parts.append("<diagnosis>\n\(analysis)\n</diagnosis>") }
 
-        let answered = questions.filter { !$0.answer.trimmingCharacters(in: .whitespaces).isEmpty }
+        var diagnosisLines: [String] = []
+        if !diagnosis.brief.isEmpty { diagnosisLines.append(diagnosis.brief) }
+        if !diagnosis.taskType.isEmpty {
+            diagnosisLines.append("Task type: \(diagnosis.taskType). Risk: \(diagnosis.risk).")
+        }
+        if !diagnosis.findings.isEmpty {
+            let fs = diagnosis.findings
+                .map { "- \($0.code) (\($0.severity.rawValue)): \($0.fix)" }
+                .joined(separator: "\n")
+            diagnosisLines.append("Defects to fix:\n\(fs)")
+        }
+        // The analyzer's own defaults were being collected and thrown away, which is why prompts
+        // arrived with invented specifics recorded nowhere.
+        if !diagnosis.assumptions.isEmpty {
+            let as_ = diagnosis.assumptions.map { "- \($0)" }.joined(separator: "\n")
+            diagnosisLines.append("Defaults already decided for you (record these under Assumptions):\n\(as_)")
+        }
+        if !diagnosisLines.isEmpty {
+            parts.append("<diagnosis>\n\(diagnosisLines.joined(separator: "\n\n"))\n</diagnosis>")
+        }
+
+        let answered = questions.filter { !$0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         if !answered.isEmpty {
             let qa = answered.map { "Q: \($0.question)\nA: \($0.answer)" }.joined(separator: "\n\n")
             parts.append("<clarifications>\n\(qa)\n</clarifications>")
         }
 
-        // TODO(human): decide what the writer should do with questions the user left unanswered.
+        // Questions the user skipped are not dropped: the writer must pick a default and declare it, and
+        // the linter fails the output if it does not.
+        let unanswered = questions.filter { $0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if !unanswered.isEmpty {
+            let qs = unanswered
+                .map { "- \($0.question) → default to record: \($0.default.isEmpty ? "your best judgement" : $0.default)" }
+                .joined(separator: "\n")
+            parts.append("""
+            <unanswered>
+            The user did not answer these. Do not leave them open and do not ask again: decide each one, \
+            state the decision in the Assumptions section in one line, and write the prompt as if that \
+            decision were the requirement.
+            \(qs)
+            </unanswered>
+            """)
+        }
+
+        // Axis notes only for the axes the analyzer marked down: the writer needs to know which
+        // dimensions are weak, and it cannot know that from a defect list that names symptoms.
+        let weak = Axis.allCases.compactMap { axis -> String? in
+            guard let v = diagnosis.scores[axis.rawValue], v.score <= 2, !v.note.isEmpty else { return nil }
+            return "- \(axis.title) (\(v.score)/4): \(v.note)"
+        }
+        if !weak.isEmpty {
+            parts.append("""
+            <weak_axes>
+            The reviewer scored these below the bar. The rubric you are being judged against is in your \
+            instructions; raise each of these to a 4 or state why it does not apply.
+            \(weak.joined(separator: "\n"))
+            </weak_axes>
+            """)
+        }
 
         parts.append("Write the improved prompt now.")
         return parts.joined(separator: "\n\n")
     }
 
-    /// Appends the user's profile (if any) so both stages tailor to the person, not just the draft.
+    // MARK: - Stage 3: verify
+
+    static func critic(target: PromptTarget) -> String {
+        """
+        You are the verification stage of a prompt compiler. You did not write this prompt and you owe it \
+        nothing. Your job is to find the defects that will actually cost the user a bad result.
+
+        \(rubricBlock(for: target))
+
+        \(defectBlock)
+
+        <rules>
+        - Quote the exact text for every issue. No quote, no issue.
+        - A blocker is something that makes the prompt fail on a normal input. A major is something that \
+        forces rework. A minor is polish. Report minors sparingly.
+        - Do not reward length. A tight prompt that covers the axes beats a long one that repeats itself.
+        - Run the contradiction pass explicitly: collect the rules that constrain the same action, then \
+        check each pair. Two rules that cannot both be followed are blockers even when each looks sensible \
+        alone. Resolve them by naming the priority, not by deleting one.
+        - Run the criteria pass: for each success criterion, ask whether a second person could run it and \
+        get a yes or no. If not, it is a major.
+        - Run the executability pass: for each criterion, name the tool or observation the executor \
+        actually has. A contrast ratio, a benchmark or a "user finds it clear" with no named method is \
+        a major (D18) — the executor will either guess or skip it, and either way the criterion is \
+        decorative.
+        - Run the fabrication pass: every number, name, URL, date, count and citation in the prompt is \
+        either supplied by the request or listed under Assumptions. Anything asserted as given fact that \
+        was not given is a blocker (D17). This is the failure this tool exists to prevent, so check it \
+        even when the prompt reads well.
+        - Run the contract pass: does the output contract name format, structure, length, language, and at \
+        least one exclusion?
+        - Check the medium: a chat message with autonomy sections is padded; an agent prompt with no \
+        verification is under-specified; a system prompt tied to one scenario is not reusable.
+        - Check that the prompt instructs rather than performs. If it contains the finished deliverable, \
+        that is a blocker.
+        - Ignore taste. Report nothing you would not defend to the author.
+        </rules>
+
+        Reply with JSON only. No prose, no fence. Key order matters: issues before scores.
+        {
+          "verdict": "ship|repair",
+          "summary": "one or two sentences a busy user can act on",
+          "issues": [
+            {"axis": "criteria", "severity": "blocker", "quote": "exact text", "problem": "why it fails", "fix": "the replacement text or the change to make"}
+          ],
+          "strengths": ["what is already working, one line each, at most three"],
+          "scores": {"goal": {"note": "why", "score": 3}}
+        }
+        Use "repair" when any issue is a blocker or major. Include a score entry for every axis.
+        """
+    }
+
+    static func criticInput(prompt: String, draft: String, target: PromptTarget) -> String {
+        """
+        Intended use: \(target.rawValue)
+
+        <original_request>
+        \(draft)
+        </original_request>
+
+        <prompt_under_review>
+        \(prompt)
+        </prompt_under_review>
+
+        Verify it.
+        """
+    }
+
+    // MARK: - Stage 4: repair
+
+    static let repair = """
+    You are the repair stage of a prompt compiler. You receive a prompt and a verified list of issues. \
+    Return the corrected prompt in full.
+
+    <rules>
+    - Minimal edits. Keep every line that no issue implicates, word for word. The user is paying for \
+    their prompt to get better, not different.
+    - Fix by replacing, not appending. If a fix would add a section, first check whether an existing \
+    section should absorb it. Length added to cure vagueness is a new defect.
+    - Never fix an issue by deleting the requirement behind it. If a rule is wrong, correct it; do not \
+    drop the constraint the user asked for.
+    - Resolve a contradiction by choosing the reading that serves the stated objective, and record that \
+    choice as one line in the prompt's Assumptions section. Do not add commentary outside the prompt.
+    - Keep the language, the terminology and the user's explicit constraints.
+    - If an issue cannot be fixed without information you do not have, leave a clearly marked \
+    {{PLACEHOLDER}} and add the line to Assumptions. Do not invent a fact.
+    </rules>
+
+    Output the full corrected prompt only: no diff, no commentary, no fence around the whole thing.
+    """
+
+    static func repairInput(prompt: String, issues: [CritiqueIssue], target: PromptTarget) -> String {
+        let list = issues.enumerated().map { i, issue in
+            """
+            \(i + 1). [\(issue.severity.rawValue)] \(issue.axis)
+               quote: \(issue.quote)
+               problem: \(issue.problem)
+               fix: \(issue.fix)
+            """
+        }.joined(separator: "\n")
+        return """
+        Intended use: \(target.rawValue)
+
+        <issues>
+        \(list)
+        </issues>
+
+        <prompt>
+        \(prompt)
+        </prompt>
+
+        Return the corrected prompt.
+        """
+    }
+
+    // MARK: - Stage 5: acceptance tests
+
+    static func evalSuite(target: PromptTarget) -> String {
+        """
+        You write acceptance tests for a prompt. A test is an input that a weak version of the prompt \
+        fails and a good version passes.
+
+        Rules:
+        - 3 to 5 cases. Each one must exercise a different failure mode: a missing input, an ambiguous \
+        request, an edge case, a temptation to ignore the output contract, a request that is out of scope.
+        - "expects" lists observable properties of the answer, not feelings. "Names a source URL for every \
+        claim" is a property; "is high quality" is not.
+        - "trap" says why a careless execution fails this case, in one sentence.
+        - Inputs must be realistic and short: what a real user would actually paste.
+        - Write the judge rubric as a five-line checklist a person can apply without the model's help.
+
+        Reply with JSON only, no fence:
+        {"cases":[{"name":"...","input":"...","expects":["..."],"trap":"..."}],"judge_rubric":"..."}
+        """
+    }
+
+    static func evalInput(prompt: String, target: PromptTarget) -> String {
+        """
+        Intended use: \(target.rawValue)
+
+        <prompt>
+        \(prompt)
+        </prompt>
+
+        Write the acceptance tests.
+        """
+    }
+
+    // MARK: - Refine
+
+    static func refineInstruction(_ instruction: String) -> String {
+        """
+        Revise the prompt: \(instruction)
+
+        Apply the change and keep everything else intact. Re-run the contradiction check afterwards: a \
+        revision that introduces a rule conflicting with an existing one is worse than no revision. \
+        Return the full revised prompt only.
+        """
+    }
+
+    // MARK: - Personalisation
+
+    /// Appends the user's profile so both stages tailor to the person, not just the draft.
     static func personalize(_ system: String, profile: String?) -> String {
         guard let profile else { return system }
         return system + """
 
 
-        About the user. Use it to tailor the prompt. It overrides generic defaults, never explicit \
-        statements in the draft. Don't ask questions this profile already answers, and don't copy it verbatim into the prompt:
+        <user_profile>
         \(profile)
+        </user_profile>
+
+        Use the profile to tailor the prompt. It overrides generic defaults and never overrides an \
+        explicit statement in the request. Do not ask questions the profile already answers, and do not \
+        copy the profile into the prompt.
         """
     }
 
-    // MARK: Helpers
+    // MARK: - Output hygiene
 
     /// Removes <think>…</think> blocks some reasoning models emit inline: an unclosed one mid-stream, and an
     /// orphan </think> (chat templates that put the opening tag in the prompt, so only the closing tag comes back).
@@ -178,16 +599,64 @@ enum MetaPrompts {
         return lines[1..<(lines.count - 1)].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Tolerant JSON extraction: models wrap JSON in prose or fences, and one malformed question
-    /// must not throw away the others. If nothing parses, no raw JSON leaks into the diagnosis.
-    static func parseAnalysis(_ raw: String) -> (String, [ClarifyingQuestion]) {
-        let text = stripThinking(raw)
-        guard let a = text.firstIndex(of: "{"), let b = text.lastIndex(of: "}"), a < b,
-              let obj = try? JSONSerialization.jsonObject(with: Data(text[a...b].utf8)) as? [String: Any]
-        else { return ("", []) }
+    // MARK: - Tolerant JSON
 
-        let analysis = obj["analysis"] as? String ?? ""
-        let qs = (obj["questions"] as? [Any] ?? []).compactMap { item -> ClarifyingQuestion? in
+    /// Pulls the first complete JSON object out of a model reply. Models wrap JSON in prose, fences, or
+    /// emit a second object afterwards; a brace counter that respects string literals handles all three.
+    static func jsonObject(from raw: String) -> [String: Any]? {
+        let text = unfence(stripThinking(raw))
+        guard let start = text.firstIndex(of: "{") else { return nil }
+
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var end: String.Index?
+
+        var i = start
+        while i < text.endIndex {
+            let c = text[i]
+            if inString {
+                if escaped { escaped = false }
+                else if c == "\\" { escaped = true }
+                else if c == "\"" { inString = false }
+            } else {
+                if c == "\"" { inString = true }
+                else if c == "{" { depth += 1 }
+                else if c == "}" {
+                    depth -= 1
+                    if depth == 0 { end = i; break }
+                }
+            }
+            i = text.index(after: i)
+        }
+        guard let end else { return nil }
+        let slice = text[start...end]
+        return (try? JSONSerialization.jsonObject(with: Data(slice.utf8))) as? [String: Any]
+    }
+
+    static func parseDiagnosis(_ raw: String) -> Diagnosis {
+        var d = Diagnosis()
+        guard let obj = jsonObject(from: raw) else { return d }
+
+        d.brief = (obj["brief"] as? String) ?? ""
+        d.taskType = (obj["task_type"] as? String) ?? ""
+        d.risk = (obj["risk"] as? String) ?? "low"
+        d.assumptions = (obj["assumptions"] as? [Any] ?? []).compactMap { $0 as? String }
+
+        d.findings = (obj["findings"] as? [Any] ?? []).compactMap { item in
+            guard let f = item as? [String: Any],
+                  let code = f["code"] as? String else { return nil }
+            let sev = Defect.Severity(rawValue: (f["severity"] as? String ?? "minor").lowercased())
+                ?? Defect.severity(for: code)
+            return Finding(code: code.uppercased(),
+                           severity: sev,
+                           quote: (f["quote"] as? String) ?? "",
+                           fix: (f["fix"] as? String) ?? "")
+        }
+
+        d.scores = parseScores(obj["scores"])
+
+        d.questions = (obj["questions"] as? [Any] ?? []).compactMap { item in
             guard let q = item as? [String: Any],
                   let text = (q["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !text.isEmpty else { return nil }
@@ -196,9 +665,64 @@ enum MetaPrompts {
                 if let n = opt as? NSNumber { return n.stringValue }
                 return nil
             }
-            return ClarifyingQuestion(question: text, why: q["why"] as? String ?? "", options: options)
+            return ClarifyingQuestion(question: text,
+                                      why: q["why"] as? String ?? "",
+                                      options: options,
+                                      default: q["default"] as? String ?? "")
         }
-        return (analysis, Array(qs.prefix(4)))
+        d.questions = Array(d.questions.prefix(4))
+        return d
+    }
+
+    static func parseCritique(_ raw: String) -> Critique? {
+        guard let obj = jsonObject(from: raw) else { return nil }
+        var c = Critique()
+        c.verdict = (obj["verdict"] as? String)?.lowercased() == "repair" ? "repair" : "ship"
+        c.summary = (obj["summary"] as? String) ?? ""
+        c.scores = parseScores(obj["scores"])
+        c.strengths = (obj["strengths"] as? [Any] ?? []).compactMap { $0 as? String }
+
+        c.issues = (obj["issues"] as? [Any] ?? []).compactMap { item in
+            guard let i = item as? [String: Any],
+                  let axis = i["axis"] as? String else { return nil }
+            let sev = Defect.Severity(rawValue: (i["severity"] as? String ?? "minor").lowercased()) ?? .minor
+            return CritiqueIssue(axis: axis.lowercased(),
+                                 severity: sev,
+                                 quote: (i["quote"] as? String) ?? "",
+                                 problem: (i["problem"] as? String) ?? "",
+                                 fix: (i["fix"] as? String) ?? "")
+        }
+        return c
+    }
+
+    static func parseEvalSuite(_ raw: String) -> EvalSuite? {
+        guard let obj = jsonObject(from: raw) else { return nil }
+        var suite = EvalSuite()
+        suite.judgeRubric = (obj["judge_rubric"] as? String) ?? ""
+        suite.cases = (obj["cases"] as? [Any] ?? []).compactMap { item in
+            guard let c = item as? [String: Any],
+                  let name = c["name"] as? String else { return nil }
+            return EvalCase(name: name,
+                            input: (c["input"] as? String) ?? "",
+                            expects: (c["expects"] as? [Any] ?? []).compactMap { $0 as? String },
+                            trap: (c["trap"] as? String) ?? "")
+        }
+        return suite.cases.isEmpty && suite.judgeRubric.isEmpty ? nil : suite
+    }
+
+    /// Accepts both {"goal": {"note": "...", "score": 3}} and {"goal": 3}.
+    private static func parseScores(_ any: Any?) -> [String: AxisVerdict] {
+        guard let dict = any as? [String: Any] else { return [:] }
+        var out: [String: AxisVerdict] = [:]
+        for (key, value) in dict {
+            if let n = value as? NSNumber {
+                out[key.lowercased()] = AxisVerdict(score: n.intValue, note: "")
+            } else if let d = value as? [String: Any] {
+                let score = (d["score"] as? NSNumber)?.intValue ?? 2
+                out[key.lowercased()] = AxisVerdict(score: score, note: (d["note"] as? String) ?? "")
+            }
+        }
+        return out
     }
 }
 
@@ -208,4 +732,6 @@ struct ClarifyingQuestion: Identifiable, Hashable {
     var why: String
     var options: [String]
     var answer = ""
+    /// The answer the writer will assume if the user skips. Recorded under Assumptions.
+    var `default` = ""
 }

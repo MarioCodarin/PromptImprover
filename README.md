@@ -7,9 +7,13 @@ Write what you want in a few words. The app reads it, asks a few short questions
 ## Features
 
 - **Menu bar only.** There is no Dock icon and no main window. Click the icon and a compact panel opens. When the result is ready, **Expand** grows the same panel so you can read, refine and copy the whole prompt.
-- **Two stages.**
-  1. *Diagnose:* the model checks your draft for goal, done criteria, context, inputs, constraints, deliverable and autonomy. It asks up to 4 questions, with tappable options, and only when the answer would change the prompt. Zero questions is normal.
-  2. *Write:* the final prompt streams in, with sections such as Goal, Context, Requirements, Constraints & scope, Approach, Deliverable, Success criteria and Assumptions.
+- **Five stages, one gate.**
+  1. *Diagnose* — scores the draft 0–4 on a fixed 12-axis rubric, lists defects by code (`D02` = no success criteria), and asks up to 4 questions — only when no defensible default exists. Zero questions is normal.
+  2. *Write* — compiles the brief into an executable prompt, streaming as it goes.
+  3. *Lint* — 19 deterministic structural checks, offline and free: missing sections, unmeasurable criteria, two output formats at once, two different length limits, chat preamble, code fences, shouted rules, unanswered questions with no assumptions recorded.
+  4. *Verify* — an independent reviewer, given the same rubric the writer was given, quotes every defect it finds and scores the result. Anything blocker or major triggers a repair pass; a repair that scores worse structurally than the original is discarded. The repaired prompt is re-scored once, so the number you see describes the text you copy.
+  5. *Tests* (Deep) — 3–5 acceptance cases, each one something a weak prompt fails, plus a checklist for judging the output.
+- **Three depths.** Fast = one call, write only. Standard = diagnose, write, lint, verify, repair, re-score. Deep = adds acceptance tests. The lint gate runs in every mode.
 - **Three targets.**
   - **Agent task:** for Claude Code, Codex, OpenCode and similar tools. Adds autonomy rules, persistence, a verification step and a final report.
   - **System prompt:** a reusable system prompt.
@@ -45,6 +49,7 @@ Then:
 |---|---|
 | ⌘↩ | Improve (or **Write prompt** while answering questions) |
 | ⇧⌘C | Copy the prompt |
+| — | **Save** writes the prompt, plus the acceptance tests when there are any, to a `.md` file |
 | Esc | Collapse the expanded view |
 | ⌘, / ⌘Q | Settings / Quit (from the avatar menu) |
 
@@ -58,36 +63,96 @@ Then:
 
 ## How the prompt engineering works
 
-The meta-prompts in `MetaPrompts.swift` follow current guidance from Anthropic, OpenAI and Google on prompting frontier models and agents:
+The meta-prompts in `MetaPrompts.swift` are built from current published guidance, not vibes. Every principle below is traceable to one of these:
 
-- **State the goal and why it matters.** Models generalize better from a purpose than from bare rules.
-- **Define "done"** with checkable success criteria.
-- **Supply only the context the model can't infer.** Every line has to earn its place.
-- **Write at the right level of detail.** Give principles with reasons instead of long, brittle rule lists.
-- **Say what to do,** not only what to avoid.
-- **Spell out scope and autonomy:** what the agent can decide alone, and when it must stop and ask.
-- **Never invent facts.** Missing details become listed **Assumptions** or `{{PLACEHOLDERS}}`.
-- **Avoid filler:** no empty personas, ALL-CAPS or threats.
+- Anthropic, *Prompting best practices* — [platform.anthropic.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices](https://platform.anthropic.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)
+- Anthropic, *Metaprompt* (few-shot-by-construction: a metaprompt full of worked examples beats a metaprompt full of rules) — [github.com/anthropics/claude-cookbooks/blob/main/misc/metaprompt.ipynb](https://github.com/anthropics/claude-cookbooks/blob/main/misc/metaprompt.ipynb)
+- Anthropic, *Effective context engineering for AI agents* — [anthropic.com/engineering/effective-context-engineering-for-ai-agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+- OpenAI, *GPT-5 prompting guide* (contradictory instructions cost reasoning tokens; metaprompting with minimal edits) — [developers.openai.com/cookbook/examples/gpt-5/gpt-5_prompting_guide](https://developers.openai.com/cookbook/examples/gpt-5/gpt-5_prompting_guide)
+- Google, *Prompt design strategies* — [ai.google.dev/gemini-api/docs/prompting-strategies](https://ai.google.dev/gemini-api/docs/prompting-strategies)
+
+What the writer is actually told, and why:
+
+| Principle | Source of the rule |
+|---|---|
+| State the outcome and why it matters, not just the activity | models generalise from a purpose better than from a rule list |
+| Right altitude: specific enough to steer, general enough to cover unlisted cases | Anthropic, context engineering |
+| Every line earns its place; inferable context is noise that costs attention | Anthropic, context engineering |
+| **Contradictions are the worst defect** — check every rule pair before shipping, resolve conflicts with an explicit priority | GPT-5 guide: contradictory prompts burn reasoning on reconciliation |
+| Say what to do, not only what to avoid; prohibitions need a replacement behaviour | Anthropic, best practices |
+| Success criteria must be checkable by someone who did not do the work | rubric axis `criteria`, anchors 4/2/0 |
+| Verification is part of the task; show the evidence | Anthropic, agentic systems |
+| Autonomy is a decision: act by default, name the action classes that need confirmation | Anthropic, *Balancing autonomy and safety* |
+| Never invent names, numbers, URLs or dates; record a default as an assumption or a `{{PLACEHOLDER}}` | Gemini, structured output; this app's Assumptions section |
+| No theatre: no world-class personas, no ALL-CAPS, no threats or bribes | measured to hurt on current models |
+| Don't tell a reasoning model to think step by step; tell it what to reason about | GPT-5 guide |
+| Research tasks: prefer primary sources, a source and retrieval date per claim, separate confirmed from inferred | Anthropic, *Research and information gathering* |
+| Long material goes before the instructions that use it, wrapped in tags | Anthropic, *Long context prompting* |
+
+Two structural choices matter more than any single rule:
+
+1. **The rubric is one object, rendered into every stage.** `Axis` (12 axes, each with a 0/2/4 anchor) is injected into the analyzer, the critic and the repair brief. The score in the UI and the instruction in the prompt cannot drift apart, because they are the same value.
+2. **The model is never the only judge.** The linter is deterministic and catches the failures a model will happily wave through: a prompt with no success criteria, two contradictory length limits, a reply wrapped in a code fence. A prompt that fails the linter is marked as failing even when the critic says "ship".
 
 ## Project layout
 
 ```
 Sources/PromptImprover/
-├── PromptImproverApp.swift   MenuBarExtra + Settings scenes, menu bar template icon, --render-icon hook
+├── PromptImproverApp.swift   MenuBarExtra + Settings scenes, menu bar icon, CLI hooks (--selftest, --lint, --e2e, --dump-prompts)
 ├── ContentView.swift         PanelView: composer, questions, preview/expanded result, feedback
-├── SettingsView.swift        General · Profile · Endpoints · Feedback tabs
-├── ImproverViewModel.swift   Analyze → answer → write → refine flow, cancellation via run IDs
-├── MetaPrompts.swift         Analyzer/writer meta-prompts, personalization, tolerant parsing
-├── LLMClient.swift           OpenAI + Anthropic wire formats, SSE streaming, /models
+├── QualityPanel.swift        Rubric/structure scores, critic issues, linter findings, acceptance tests
+├── SettingsView.swift        General (depth) · Profile · Endpoints · Feedback tabs
+├── ImproverViewModel.swift   Stage orchestration, questions, cancellation via run IDs, repair regression guard
+├── PromptEngine.swift        The five stages as network calls: diagnose/write/verify/repair/tests/revise
+├── Rubric.swift              Axis + anchors, defect taxonomy, Diagnosis/Critique/EvalSuite, Rigor
+├── PromptLinter.swift        19 deterministic structural checks, 0–100 score, severity-ranked issues
+├── MetaPrompts.swift         Every meta-prompt, the brief composer, output hygiene, tolerant JSON parsing
+├── LLMClient.swift           Both wire formats, SSE streaming, retry with backoff, parameter fallback, truncation detection
 ├── Endpoints.swift           Endpoint model, presets, EndpointStore, Keychain wrapper
 ├── Profile.swift             UserProfile, feedback tags, learned preferences
+├── SelfTest.swift            59 offline checks + --lint / --dump-prompts
+├── E2E.swift                 Headless pipeline run with a stage trace (--e2e)
 ├── LoginItem.swift           SMAppService open-at-login
 └── Logo.swift                LogoMark (SwiftUI) + .icns renderer
-build.sh                      SwiftPM build → .app bundle (LSUIElement, icon, ad-hoc codesign)
+Tests/
+├── mock_llm.py               Mock provider: SSE, both wire formats, and four failure modes
+└── run_tests.sh              The whole gate: self-tests + every pipeline path
+build.sh                      SwiftPM build → self-test → .app bundle (LSUIElement, icon, ad-hoc codesign)
 ```
+
+## Verifying it
+
+```sh
+./Tests/run_tests.sh      # 51 offline checks + 8 end-to-end runs against a mock provider
+./build.sh                # runs the self-test before bundling; a regression in the prompts fails the build
+```
+
+Three commands for working on the prompts themselves:
+
+```sh
+.build/release/PromptImprover --dump-prompts            # every system prompt, with token estimates
+.build/release/PromptImprover --lint my-prompt.md --target "Chat message"
+.build/release/PromptImprover --e2e https://api.example.com/v1 \
+    --key "$KEY" --model glm-5.3-abliterated --rigor Deep --out prompt.md \
+    --price-in 1 --price-out 2
+```
+
+`--lint` takes `--target` because the required sections differ per target: a chat message is prose and has no headings, so it is matched against the body rather than at headings. It takes `--unanswered N` for the same reason the app passes it.
+
+`--e2e` drives the same `PromptEngine` the app drives, so it is a real run, not a simulation: stage trace, call count, structure score, rubric score, tokens, and the finished prompt. `--price-in` / `--price-out` are dollars per million tokens, taken from the provider's `/models` response, and make it print the run's actual cost. With `--out`, the acceptance tests are written beside the prompt as `prompt.tests.md` — never appended to it, because a prompt with a test suite stapled on cannot be pasted into a system slot. Point it at the mock to check plumbing without spending tokens:
+
+```sh
+python3 Tests/mock_llm.py 8765 &
+.build/debug/PromptImprover --e2e http://127.0.0.1:8765/v1 --key k --model mock --rigor Deep
+```
+
+The mock is hostile on purpose: it wraps its JSON in prose and fences, answers the first write with a prompt that is missing its success criteria, and reports a blocker so the repair loop runs. Its path prefix selects a failure mode — `/truncate/`, `/retry/`, `/nojson/`, `/anthropic/`, `/strict/` — which is how the truncation, backoff, parameter-fallback, Messages-SSE and locked-down-gateway paths are covered. `/strict/` rejects `stream_options` and `reasoning_effort` the way a proxy with a parameter allowlist does; both must degrade rather than fail the run.
 
 ### Notes for contributors
 
 - The project builds with **Command Line Tools only**. Their SDK lacks the SwiftUI macro plugin, so `@State` doesn't compile. Local view state uses small `ObservableObject` classes with `@StateObject` instead.
 - A cancelled `AsyncThrowingStream` finishes **without throwing**. Every async task in the view model checks its `runID` before writing state, so a stopped run can never overwrite a newer one.
-- There is an open design decision in `MetaPrompts.composeBrief`, marked `TODO(human)`: what the writer should do with questions the user left unanswered.
+- `ImproverViewModel` owns interaction; `PromptEngine` owns model calls. Keep it that way: anything that touches the network belongs in the engine, or `--e2e` stops covering it.
+- The linter only contains checks where a string test is *sound*. Semantic contradictions are left to the critic on purpose — a word-overlap heuristic flags "always run the tests" against "never commit without running tests" and calls agreement a conflict.
+- `Rigor.fast` skips the diagnosis stage entirely, so `askQuestions` has no effect there. That is the definition of Fast, not a bug.
+- When you change a prompt, run `--dump-prompts` before and after and read the diff. Prompt edits are code changes; they get reviewed like code changes.

@@ -35,6 +35,7 @@ struct SettingsView: View {
 
 private struct GeneralSettings: View {
     @StateObject private var login = LoginItem()
+    @EnvironmentObject var vm: ImproverViewModel
 
     var body: some View {
         Form {
@@ -64,6 +65,17 @@ private struct GeneralSettings: View {
                 if let err = login.lastError {
                     Text(err).font(.caption).foregroundStyle(.red)
                 }
+            }
+
+            Section("Quality") {
+                Picker("Depth", selection: $vm.rigor) {
+                    ForEach(Rigor.allCases) { r in Text(r.rawValue).tag(r) }
+                }
+                .pickerStyle(.segmented)
+                Text(vm.rigor.blurb)
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Deeper settings cost more model calls. The structural check always runs; it is local and free.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section {
@@ -140,7 +152,7 @@ private struct ProfileSettings: View {
             Section {
                 Toggle("Learn from my ratings", isOn: $profiles.profile.learnFromFeedback)
                 DisclosureGroup("What the model sees") {
-                    Text(profiles.contextBlock() ?? "")
+                    Text(profiles.contextBlock().map { "<user_profile>\n\($0)\n</user_profile>" } ?? "")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)

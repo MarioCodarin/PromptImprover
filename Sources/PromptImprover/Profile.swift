@@ -46,8 +46,8 @@ enum FeedbackTag {
         "Wrong format": "Pay extra attention to the deliverable format the user wants.",
         "Spot on": "The user has liked how closely prompts match their intent. Keep that fidelity.",
         "Great structure": "The user likes the sectioned structure. Keep it.",
-        "Right length": "The current prompt length suits the user.",
-        "Good questions": "The user finds the clarifying questions useful.",
+        "Right length": "Keep prompts at roughly this length; longer has been judged too long.",
+        "Good questions": "The user values clarifying questions: keep asking when the answer changes the prompt.",
     ]
 }
 
@@ -85,7 +85,8 @@ final class ProfileStore: ObservableObject {
         return Double(feedback.filter(\.positive).count) / Double(feedback.count)
     }
 
-    /// The block injected into both meta-prompts. Nil when there is nothing worth saying.
+    /// Profile lines injected into every meta-prompt. Unwrapped on purpose: `MetaPrompts.personalize`
+    /// owns the `<user_profile>` tags, so they are never nested twice.
     func contextBlock() -> String? {
         let p = profile
         var lines: [String] = []
@@ -100,7 +101,7 @@ final class ProfileStore: ObservableObject {
         if p.learnFromFeedback, !learnedPreferences.isEmpty {
             lines.append("Learned from the user's ratings:\n" + learnedPreferences.map { "- \($0)" }.joined(separator: "\n"))
         }
-        return "<user_profile>\n" + lines.joined(separator: "\n") + "\n</user_profile>"
+        return lines.joined(separator: "\n")
     }
 
     private func save() {

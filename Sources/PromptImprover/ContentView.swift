@@ -7,7 +7,7 @@ struct PanelView: View {
     @EnvironmentObject var vm: ImproverViewModel
 
     private var missingKey: Bool { store.selected.map { !store.hasKey($0) } ?? true }
-    private var hasResult: Bool { !vm.output.isEmpty || vm.phase == .generating }
+    private var hasResult: Bool { !vm.output.isEmpty || vm.isBusy }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -19,7 +19,7 @@ struct PanelView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .bottom)))
             } else {
                 Composer()
-                if vm.phase == .analyzing { StatusRow(text: "Reading your draft…") }
+                if vm.isBusy { StatusRow(text: vm.phase.label) }
                 if !vm.questions.isEmpty && (vm.phase == .answering) { QuestionsCard() }
                 if hasResult { ResultPreview().transition(.opacity) }
             }
@@ -36,7 +36,7 @@ struct PanelView: View {
             guard !vm.didAutoFetch, let e = store.selected, store.hasKey(e) else { return }
             vm.didAutoFetch = true
             do { try await store.refreshModels(e) }
-            catch { vm.error = "Couldn't load models: \(error.localizedDescription)" }
+            catch { vm.reportBackground("Couldn't load models: \(error.localizedDescription)") }
         }
     }
 }
@@ -167,6 +167,19 @@ private struct Composer: View {
                 .toggleStyle(.button)
                 .help(vm.askQuestions ? "Clarifying questions on" : "Clarifying questions off")
 
+                Menu {
+                    ForEach(Rigor.allCases) { r in
+                        Button { vm.rigor = r } label: {
+                            if vm.rigor == r { Label(r.rawValue, systemImage: "checkmark") } else { Text(r.rawValue) }
+                        }
+                    }
+                } label: {
+                    Label(vm.rigor.rawValue, systemImage: "dial.medium")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help(vm.rigor.blurb)
+
                 Spacer()
 
                 Button {
@@ -240,6 +253,14 @@ private struct QuestionRow: View {
                 Text(question.question).font(.system(size: 12.5, weight: .medium))
                     .fixedSize(horizontal: false, vertical: true)
             }
+            // Why the question is being asked. Without it, an interruption reads as noise.
+            if !question.why.isEmpty {
+                Text(question.why)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 18)
+            }
             if !question.options.isEmpty {
                 FlowLayout(spacing: 5) {
                     ForEach(question.options, id: \.self) { opt in
@@ -254,6 +275,15 @@ private struct QuestionRow: View {
                 .font(.system(size: 12))
                 .padding(.vertical, 5).padding(.horizontal, 8)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+
+            // Say what skipping means. The writer records this as an assumption, and the structural
+            // check fails the prompt if the assumption is never written down.
+            if !question.default.isEmpty {
+                Text("If you skip: \(question.default)")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
@@ -309,13 +339,16 @@ private struct ResultPreview: View {
             Divider().opacity(0.6)
 
             HStack(spacing: 6) {
-                if vm.phase == .generating {
+                if vm.isBusy {
                     ProgressView().controlSize(.mini)
                     Text("\(wordCount) words").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 } else {
                     Thumbs()
                 }
                 Spacer()
+                if let q = vm.qualityLine {
+                    QualityBadge(text: q)
+                }
                 CopyButton()
                 Button { vm.expanded = true } label: {
                     Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
@@ -347,7 +380,7 @@ private struct ExpandedResult: View {
                 .keyboardShortcut(.escape, modifiers: [])
 
                 Text("Prompt").font(.system(size: 13, weight: .semibold))
-                if vm.phase == .generating {
+                if vm.isBusy {
                     ProgressView().controlSize(.mini)
                     Button { vm.cancel() } label: { Image(systemName: "stop.circle") }
                         .buttonStyle(.borderless).help("Stop")
@@ -355,6 +388,7 @@ private struct ExpandedResult: View {
                 Spacer()
                 Text("\(vm.output.split(whereSeparator: \.isWhitespace).count) words · ~\(vm.output.count / 4) tok")
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                SaveButton().controlSize(.small)
                 CopyButton().controlSize(.small)
             }
             .padding(.horizontal, 12).frame(height: 40)
@@ -373,6 +407,8 @@ private struct ExpandedResult: View {
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 Divider().opacity(0.6)
             }
+
+            QualityPanel()
 
             ScrollView {
                 Text(vm.output)
@@ -404,6 +440,26 @@ private struct ExpandedResult: View {
     }
 }
 
+/// Writes the prompt, and the acceptance tests when there are any, to a markdown file.
+private struct SaveButton: View {
+    @EnvironmentObject var vm: ImproverViewModel
+
+    var body: some View {
+        Button {
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "prompt.md"
+            panel.allowedContentTypes = [.plainText]
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            var doc = vm.output
+            if let suite = vm.evalSuite { doc += "\n\n" + suite.markdown }
+            try? doc.write(to: url, atomically: true, encoding: .utf8)
+        } label: {
+            Label("Save", systemImage: "square.and.arrow.down")
+        }
+        .disabled(vm.output.isEmpty || vm.isBusy)
+    }
+}
+
 private struct CopyButton: View {
     @EnvironmentObject var vm: ImproverViewModel
     var body: some View {
@@ -413,7 +469,7 @@ private struct CopyButton: View {
         }
         .buttonStyle(.borderedProminent)
         .keyboardShortcut("c", modifiers: [.command, .shift])
-        .disabled(vm.output.isEmpty || vm.phase == .generating)
+        .disabled(vm.output.isEmpty || vm.isBusy)
     }
 }
 
