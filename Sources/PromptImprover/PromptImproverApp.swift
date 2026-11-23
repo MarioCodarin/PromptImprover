@@ -3,9 +3,7 @@ import AppKit
 
 @main
 struct PromptImproverApp: App {
-    @StateObject private var store = EndpointStore()
-    @StateObject private var vm = ImproverViewModel()
-    @StateObject private var profiles = ProfileStore()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
         // Build-time and diagnostic hooks. All of these exit before any UI is created.
@@ -92,20 +90,23 @@ struct PromptImproverApp: App {
     }
 
     var body: some Scene {
-        // Menu bar only (LSUIElement in Info.plist hides the Dock icon).
-        MenuBarExtra {
-            PanelView()
-                .environmentObject(store)
-                .environmentObject(vm)
-                .environmentObject(profiles)
-        } label: {
-            Image(nsImage: MenuBarIcon.image(busy: vm.isBusy))
-        }
-        .menuBarExtraStyle(.window)
+        // The real UI is the floating bar owned by AppDelegate. SwiftUI requires one scene; a menu
+        // bar extra that is never inserted is the only kind that never opens a window of its own
+        // (an empty Settings scene pops an empty window when the app launches without a Dock icon).
+        MenuBarExtra("Prompt Improver", isInserted: .constant(false)) { EmptyView() }
+    }
+}
 
-        Settings {
-            SettingsView().environmentObject(store).environmentObject(profiles).environmentObject(vm)
-        }
+/// Owns the stores and the floating bar. They are created at launch, not at init, so the CLI hooks
+/// in `PromptImproverApp.init` (which exit before launch) never touch the Keychain or defaults.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var bar: QuickBarController?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        bar = QuickBarController(store: EndpointStore(), vm: ImproverViewModel(), profiles: ProfileStore())
+        // `open PromptImprover.app --args --show` opens the bar straight away (screenshots, testing).
+        if CommandLine.arguments.contains("--show") { bar?.show() }
     }
 }
 

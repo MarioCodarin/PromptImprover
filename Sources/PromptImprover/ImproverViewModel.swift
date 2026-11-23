@@ -15,6 +15,9 @@ final class ImproverViewModel: ObservableObject {
     enum Phase: Equatable {
         case idle, analyzing, answering, generating, verifying, repairing, testing, done
 
+        /// A model call is in flight. One list, read by the view model and the menu bar icon.
+        var isBusy: Bool { [.analyzing, .generating, .verifying, .repairing, .testing].contains(self) }
+
         var label: String {
             switch self {
             case .idle: return ""
@@ -96,7 +99,7 @@ final class ImproverViewModel: ObservableObject {
     private var lastGood: (output: String, history: [ChatMessage], lint: PromptLinter.Report?, critique: Critique?)?
     private var startedAt = Date()
 
-    var isBusy: Bool { [.analyzing, .generating, .verifying, .repairing, .testing].contains(phase) }
+    var isBusy: Bool { phase.isBusy }
     /// A run owns the error banner from the moment it starts until it finishes, including while it
     /// waits for the user to answer questions. `isBusy` excludes `.answering` by design, so it is
     /// the wrong test for "may a background task write here".

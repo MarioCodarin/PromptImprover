@@ -1,86 +1,8 @@
 import SwiftUI
 
-// MARK: - Menu bar panel (the whole app UI)
+// MARK: - Model menu
 
-struct PanelView: View {
-    @EnvironmentObject var store: EndpointStore
-    @EnvironmentObject var vm: ImproverViewModel
-
-    private var missingKey: Bool { store.selected.map { !store.hasKey($0) } ?? true }
-    private var hasResult: Bool { !vm.output.isEmpty || vm.isBusy }
-
-    var body: some View {
-        VStack(spacing: 10) {
-            Header()
-            if missingKey { KeyBanner() }
-
-            if vm.expanded && hasResult {
-                ExpandedResult()
-                    .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .bottom)))
-            } else {
-                Composer()
-                if vm.isBusy { StatusRow(text: vm.phase.label) }
-                if !vm.questions.isEmpty && (vm.phase == .answering) { QuestionsCard() }
-                if hasResult { ResultPreview().transition(.opacity) }
-            }
-
-            if let err = vm.error { ErrorRow(message: err) }
-        }
-        .padding(12)
-        .frame(width: vm.expanded && hasResult ? 660 : 380)
-        .frame(height: vm.expanded && hasResult ? 620 : nil)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .animation(.smooth(duration: 0.25), value: vm.phase)
-        .animation(.smooth(duration: 0.25), value: vm.expanded)
-        .task {
-            guard !vm.didAutoFetch, let e = store.selected, store.hasKey(e) else { return }
-            vm.didAutoFetch = true
-            do { try await store.refreshModels(e) }
-            catch { vm.reportBackground("Couldn't load models: \(error.localizedDescription)") }
-        }
-    }
-}
-
-// MARK: - Header
-
-private struct Header: View {
-    @EnvironmentObject var vm: ImproverViewModel
-    @EnvironmentObject var profiles: ProfileStore
-    @Environment(\.openSettings) private var openSettings
-    private func showSettings() {
-        // Accessory (menu bar) apps aren't frontmost: open first, then force-activate so Settings isn't hidden.
-        openSettings()
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ModelMenu()
-            Spacer()
-            if vm.phase != .idle {
-                Button { vm.reset() } label: { Image(systemName: "square.and.pencil") }
-                    .buttonStyle(.borderless)
-                    .help("New prompt")
-            }
-            Menu {
-                Button("Settings…") { showSettings() }
-                    .keyboardShortcut(",")
-                Button("New prompt") { vm.reset() }
-                Divider()
-                Button("Quit Prompt Improver") { NSApp.terminate(nil) }
-                    .keyboardShortcut("q")
-            } label: {
-                Avatar(initials: profiles.profile.initials, size: 20)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-        }
-        .font(.system(size: 12))
-    }
-}
-
-private struct ModelMenu: View {
+struct ModelMenu: View {
     @EnvironmentObject var store: EndpointStore
     @EnvironmentObject var vm: ImproverViewModel
 
@@ -108,9 +30,12 @@ private struct ModelMenu: View {
                 }
             }
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: 5) {
                 Circle().fill(statusColor).frame(width: 6, height: 6)
                 Text(store.selected?.selectedModel ?? "Choose model")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 110)
                     .foregroundStyle(.secondary)
             }
         }
@@ -121,102 +46,18 @@ private struct ModelMenu: View {
 
     /// The dot is a status light, so it has to have more than one state. It was unconditionally
     /// green: the panel said "ready" with no key stored and no model picked.
-    private var statusColor: Color {
+    var statusColor: Color {
         guard let e = store.selected else { return .secondary }
         guard store.hasKey(e) else { return .orange }
         return e.selectedModel == nil ? .secondary : .green
     }
 }
 
-// MARK: - Composer
-
-private struct Composer: View {
-    @EnvironmentObject var store: EndpointStore
-    @EnvironmentObject var profiles: ProfileStore
-    @EnvironmentObject var vm: ImproverViewModel
-
-    private var canSend: Bool { !vm.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    private var greeting: String {
-        let first = profiles.profile.name.split(separator: " ").first.map(String.init)
-        return first.map { "Hi \($0), what should an AI do?" } ?? "What should an AI do?"
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                if vm.draft.isEmpty {
-                    Text(greeting)
-                        .font(.system(size: 14))
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, 5)
-                        .allowsHitTesting(false)
-                }
-                TextEditor(text: $vm.draft)
-                    .textEditorStyle(.plain)
-                    .scrollContentBackground(.hidden)
-                    .font(.system(size: 14))
-            }
-            .frame(height: vm.phase == .idle ? 110 : 64)
-            .padding([.horizontal, .top], 10)
-
-            HStack(spacing: 6) {
-                Menu {
-                    ForEach(PromptTarget.allCases) { t in
-                        Button { vm.target = t } label: { Label(t.rawValue, systemImage: t.icon) }
-                    }
-                } label: {
-                    Label(vm.target.rawValue, systemImage: vm.target.icon)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-
-                Toggle(isOn: $vm.askQuestions) {
-                    Image(systemName: "questionmark.bubble")
-                }
-                .toggleStyle(.button)
-                .help(vm.askQuestions ? "Clarifying questions on" : "Clarifying questions off")
-
-                Menu {
-                    ForEach(Rigor.allCases) { r in
-                        Button { vm.rigor = r } label: {
-                            if vm.rigor == r { Label(r.rawValue, systemImage: "checkmark") } else { Text(r.rawValue) }
-                        }
-                    }
-                } label: {
-                    Label(vm.rigor.rawValue, systemImage: "dial.medium")
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help(vm.rigor.blurb)
-
-                Spacer()
-
-                Button {
-                    vm.isBusy ? vm.cancel() : vm.start(store: store, profile: profiles)
-                } label: {
-                    Image(systemName: vm.isBusy ? "stop.fill" : "arrow.up")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 26, height: 26)
-                        .background(Circle().fill(canSend || vm.isBusy ? Color.accentColor : Color.secondary.opacity(0.3)))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut(vm.phase == .answering ? nil : KeyboardShortcut(.return, modifiers: .command))
-                .disabled((!canSend && !vm.isBusy) || vm.phase == .answering)
-                .help(vm.isBusy ? "Stop" : "Improve (⌘↩)")
-            }
-            .controlSize(.small)
-            .padding(8)
-        }
-        .card()
-    }
-}
-
 // MARK: - Questions
 
-private struct QuestionsCard: View {
+struct QuestionsCard: View {
     @EnvironmentObject var vm: ImproverViewModel
+    @EnvironmentObject var ui: QuickBarUI
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -227,7 +68,7 @@ private struct QuestionsCard: View {
                     }
                 }
             }
-            .frame(maxHeight: 300)
+            .frame(maxHeight: max(260, ui.maxHeight * 0.55))
 
             HStack {
                 Button("Skip") { vm.skipQuestions() }
@@ -235,12 +76,13 @@ private struct QuestionsCard: View {
                 Spacer()
                 Button("Write prompt") { vm.generate() }
                     .buttonStyle(.borderedProminent)
+                    .help("Write prompt (⌘↩)")
                     .keyboardShortcut(.return, modifiers: .command)
             }
             .controlSize(.small)
         }
-        .card(padding: 12)
-        .transition(.move(edge: .top).combined(with: .opacity))
+        .card(padding: 14)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     private func binding(_ id: UUID) -> Binding<ClarifyingQuestion> {
@@ -259,7 +101,7 @@ private struct QuestionRow: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("\(number).").font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(.secondary)
-                Text(question.question).font(.system(size: 12.5, weight: .medium))
+                Text(question.question).font(.system(size: 13, weight: .medium))
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Why the question is being asked. Without it, an interruption reads as noise.
@@ -279,11 +121,18 @@ private struct QuestionRow: View {
                     }
                 }
             }
-            TextField("Or type an answer…", text: $question.answer)
+            // Multi-line: a real answer is a sentence or three, not a word. It grows to eight lines
+            // and then scrolls; ⌥↩ inserts a line break.
+            TextField(question.options.isEmpty ? "Type your answer…" : "Or type your own answer…",
+                      text: $question.answer, axis: .vertical)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .padding(.vertical, 5).padding(.horizontal, 8)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+                .font(.system(size: 13))
+                .lineLimit(3...8)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(0.06)))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08)))
 
             // Say what skipping means. The writer records this as an assumption, and the structural
             // check fails the prompt if the assumption is never written down.
@@ -308,7 +157,7 @@ struct Chip: View {
                 .font(.system(size: 12))
                 .padding(.horizontal, 9).padding(.vertical, 3)
                 .foregroundStyle(selected ? Color.white : Color.primary)
-                .background(Capsule().fill(selected ? Color.accentColor : Color.primary.opacity(0.07)))
+                .background(Capsule().fill(selected ? Color.spark : Color.primary.opacity(0.08)))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -318,7 +167,7 @@ struct Chip: View {
 
 // MARK: - Result (compact preview)
 
-private struct ResultPreview: View {
+struct ResultPreview: View {
     @EnvironmentObject var vm: ImproverViewModel
 
     var body: some View {
@@ -375,7 +224,7 @@ private struct ResultPreview: View {
 
 // MARK: - Result (expanded)
 
-private struct ExpandedResult: View {
+struct ExpandedResult: View {
     @EnvironmentObject var vm: ImproverViewModel
 
     var body: some View {
@@ -385,8 +234,7 @@ private struct ExpandedResult: View {
                     Image(systemName: "arrow.down.right.and.arrow.up.left")
                 }
                 .buttonStyle(.borderless)
-                .help("Collapse")
-                .keyboardShortcut(.escape, modifiers: [])
+                .help("Collapse (Esc)")
 
                 Text("Prompt").font(.system(size: 13, weight: .semibold))
                 if vm.isBusy {
@@ -434,15 +282,16 @@ private struct ExpandedResult: View {
                 HStack(spacing: 8) {
                     Thumbs()
                     Divider().frame(height: 16)
-                    TextField("Refine: \"shorter\", \"add a table\", \"for Claude Code\"…", text: $vm.refineText)
+                    TextField("Refine: \"shorter\", \"add a table\", \"for Claude Code\"…", text: $vm.refineText, axis: .vertical)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12))
+                        .font(.system(size: 12.5))
+                        .lineLimit(1...4)
                         .onSubmit { vm.refine() }
                     Button("Refine") { vm.refine() }
                         .controlSize(.small)
-                        .disabled(vm.refineText.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .disabled(vm.refineText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                .padding(.horizontal, 12).frame(height: 42)
+                .padding(.horizontal, 12).padding(.vertical, 10)
             }
         }
         .card()
@@ -465,6 +314,9 @@ private struct SaveButton: View {
     /// reason, and this used to append, so the app and the harness produced different artefacts
     /// from the same run.
     private func save() {
+        // The bar is a non-activating panel, so the app may not be active: without this the
+        // Save panel opens unfocused and typing goes to the previous app.
+        NSApp.activate(ignoringOtherApps: true)
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "prompt.md"
         panel.allowedContentTypes = [.plainText]
@@ -566,20 +418,16 @@ private struct Thumbs: View {
 
 // MARK: - Small pieces
 
-private struct KeyBanner: View {
-    @Environment(\.openSettings) private var openSettings
-    private func showSettings() {
-        // Accessory (menu bar) apps aren't frontmost: open first, then force-activate so Settings isn't hidden.
-        openSettings()
-        NSApp.activate(ignoringOtherApps: true)
-    }
+struct KeyBanner: View {
+    @EnvironmentObject var ui: QuickBarUI
+    private func showSettings() { ui.openSettings() }
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "key.fill")
                 .font(.system(size: 11))
                 .foregroundStyle(.white)
                 .frame(width: 22, height: 22)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.gradient))
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.spark.gradient))
             Text("Add your API key to start").font(.system(size: 12, weight: .medium))
             Spacer()
             Button("Settings") { showSettings() }.controlSize(.small)
@@ -588,7 +436,7 @@ private struct KeyBanner: View {
     }
 }
 
-private struct StatusRow: View {
+struct StatusRow: View {
     let text: String
     var body: some View {
         HStack(spacing: 8) {
@@ -601,7 +449,7 @@ private struct StatusRow: View {
     }
 }
 
-private struct ErrorRow: View {
+struct ErrorRow: View {
     @EnvironmentObject var vm: ImproverViewModel
     let message: String
     var body: some View {
@@ -617,14 +465,24 @@ private struct ErrorRow: View {
 
 // MARK: - Shared styling
 
+extension Color {
+    /// The one accent: the coral of the logo's spark.
+    static let spark = Color(red: 0.85, green: 0.47, blue: 0.34)
+    /// Surface of the bar and every card above it.
+    static let barSurface = Color(red: 0.125, green: 0.118, blue: 0.137)
+}
+
 extension View {
-    /// Flat surface with a hairline border — the one container style used everywhere.
-    func card(padding: CGFloat = 0) -> some View {
+    /// Dark rounded surface with a hairline edge and a soft shadow: the one container style, used
+    /// by the bar and every card stacked above it.
+    func card(padding: CGFloat = 0, radius: CGFloat = 16) -> some View {
         self.padding(padding)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor)))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08)))
+            .background(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(Color.barSurface.opacity(0.97)))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.09)))
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
     }
 }
 

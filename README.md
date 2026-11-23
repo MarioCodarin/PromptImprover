@@ -6,7 +6,7 @@ Write what you want in a few words. The app reads it, asks a few short questions
 
 ## Features
 
-- **Menu bar only.** There is no Dock icon and no main window. Click the icon and a compact panel opens. When the result is ready, **Expand** grows the same panel so you can read, refine and copy the whole prompt.
+- **A bar above the Dock.** There is no Dock icon and no main window. Click the menu bar icon and a dark prompt bar opens just above the Dock, centred on the screen you're using. Questions, progress and the result stack *above* the bar, which stays put while the panel grows upward. **Expand** opens the full prompt so you can read, refine and copy it. Clicking elsewhere hides the bar, except while a prompt is being written or questions are waiting for answers.
 - **Six stages, one gate.**
   1. *Diagnose* — scores the draft 0–4 on a fixed rubric (12 axes; 11 for a chat message, which drops autonomy), lists defects by code (`D02` = no success criteria), and asks up to 4 questions — only when no defensible default exists. Zero questions is normal.
   2. *Write* — compiles the brief into an executable prompt, streaming as it goes.
@@ -40,19 +40,20 @@ Requires macOS 14+ and a Swift toolchain. The Command Line Tools are enough; Xco
 
 Then:
 
-1. Click the `>_✦` icon in the menu bar → avatar menu → **Settings…** (⌘,).
+1. Click the `>_✦` icon in the menu bar → the ✦ on the left of the bar → **Settings…** (⌘,).
 2. In **Endpoints**, paste your API key. Refuseless keys start with `abl_`.
 3. Press **Test & fetch models**.
 4. Optional: fill in **Profile**.
-5. Type an idea in the panel and press **⌘↩**.
+5. Type an idea in the bar and press **↩**.
 
 | Shortcut | Action |
 |---|---|
-| ⌘↩ | Improve (or **Write prompt** while answering questions) |
+| ↩ / ⌘↩ | Improve. After a result, only ⌘↩ re-runs (↩ alone would overwrite it); ⌘↩ is **Write prompt** while answering questions |
+| ⌥↩ | New line in the bar or in an answer |
 | ⇧⌘C | Copy the prompt |
 | — | **Save** writes the prompt to the file you pick, and the acceptance tests beside it as `prompt.tests.md` |
-| Esc | Collapse the expanded view |
-| ⌘, / ⌘Q | Settings / Quit (from the avatar menu) |
+| Esc | Collapse the expanded view, then hide the bar |
+| ⌘, / ⌘Q | Settings / Quit (from the ✦ menu on the left of the bar) |
 
 ## Privacy & security
 
