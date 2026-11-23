@@ -4,11 +4,10 @@ import SwiftUI
 struct QualityBadge: View {
     let text: String
     var body: some View {
+        // Quiet mono meta, not a pill.
         Text(text)
-            .font(.system(size: 10, design: .monospaced))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(Capsule().fill(Color.primary.opacity(0.06)))
+            .font(.figure)
+            .foregroundStyle(.tertiary)
             .help("Rubric is the critic's weighted judgement of twelve axes; its run-to-run spread "
                   + "on identical text is \(RubricNoise.measuredSpread) points, so read it as a band. "
                   + "Structure is the deterministic linter: same input, same score, every time.")
@@ -34,29 +33,23 @@ struct QualityPanel: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: icon)
-                        .font(.system(size: 11))
-                        .foregroundStyle(tint)
-                    Text("Quality").font(.system(size: 12, weight: .medium))
+                    // A status dot, not a coloured seal: it carries meaning, so it stays small.
+                    Circle().fill(tint).frame(width: 6, height: 6)
+                    Text("Quality").font(.ui)
                     if let line = vm.qualityLine {
-                        Text(line).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                        Text(line).font(.figure).foregroundStyle(.tertiary)
                     }
                 }
             }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            Divider().opacity(0.6)
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            Divider().opacity(0.5)
         }
-    }
-
-    private var icon: String {
-        guard let l = vm.lint else { return "checkmark.seal" }
-        return l.isClean ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
     }
 
     private var tint: Color {
         guard let l = vm.lint else { return .secondary }
-        if !l.blockers.isEmpty { return .red }
-        return l.isClean ? .green : .orange
+        if !l.blockers.isEmpty { return .bad }
+        return l.isClean ? .ok : .warn
     }
 
     // MARK: Sections
@@ -67,7 +60,7 @@ struct QualityPanel: View {
                 // Labelled as a rubric score, not a quality percentage: the two 0-100 numbers on
                 // this panel come from different instruments and one blocker costs each of them a
                 // different amount.
-                ScoreRow(label: "Rubric", value: c.total(for: vm.runTarget), suffix: "/100",
+                ScoreRow(label: "Rubric", value: c.total(for: vm.runTarget), suffix: "/100", lead: true,
                          help: "Weighted mean of the twelve axes the critic scored. The critic's own "
                              + "run-to-run spread on identical text is \(RubricNoise.measuredSpread) "
                              + "points, so treat this as a band and compare it with nothing.")
@@ -76,7 +69,7 @@ struct QualityPanel: View {
                 let absent = c.missingAxes(for: vm.runTarget)
                 if !absent.isEmpty {
                     Text("Scored without: " + absent.map(\.title).joined(separator: ", "))
-                        .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                        .font(.meta).foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 // The part of the score a reader can act on. Twelve per-axis marks survive the
@@ -85,22 +78,22 @@ struct QualityPanel: View {
                 let weak = c.weakestAxes(for: vm.runTarget)
                 if !weak.isEmpty {
                     Text("Below the bar: " + weak.map(\.title).joined(separator: ", "))
-                        .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                        .font(.meta).foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             if let l = vm.lint {
                 ScoreRow(label: "Structure", value: l.score, suffix: "/100",
                          help: "Deterministic linter. Same input, same score, every time.")
-                Text(l.summary).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(l.summary).font(.meta).foregroundStyle(.secondary)
             }
             if let c = vm.critique, !c.strengths.isEmpty {
                 Text("Working: " + c.strengths.joined(separator: " · "))
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .font(.meta).foregroundStyle(.secondary)
             }
             // Cost is part of the result: a Deep run is five or six calls, and that is a decision.
             Text("\(vm.calls) model call\(vm.calls == 1 ? "" : "s") · \(String(format: "%.1f", vm.elapsed))s · \(vm.tokensIn) in / \(vm.tokensOut) out")
-                .font(.system(size: 10.5, design: .monospaced))
+                .font(.figure)
                 .foregroundStyle(.tertiary)
         }
     }
@@ -108,7 +101,7 @@ struct QualityPanel: View {
     private func verdict(_ c: Critique) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if !c.summary.isEmpty {
-                Text(c.summary).font(.system(size: 12))
+                Text(c.summary).font(.ui)
             }
             // Positional identity, not `issue.id`. Identity derived from model text collides: two
             // issues on one axis with an omitted quote and problem produce the same string, and
@@ -120,7 +113,7 @@ struct QualityPanel: View {
                          detail: issue.quote.isEmpty ? issue.fix : "\u{201C}\(issue.quote)\u{201D} → \(issue.fix)")
             }
             if c.needsRepair, let note = repairNote {
-                Text(note).font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                Text(note).font(.meta).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -143,8 +136,8 @@ struct QualityPanel: View {
     private func structure(_ l: PromptLinter.Report) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if l.issues.isEmpty {
-                Label("No structural defects.", systemImage: "checkmark")
-                    .font(.system(size: 12)).foregroundStyle(.green)
+                Text("No structural defects")
+                    .font(.ui).foregroundStyle(.secondary)
             }
             ForEach(l.issues) { issue in
                 IssueRow(severity: issue.severity.rawValue, title: issue.title, detail: issue.detail)
@@ -155,17 +148,17 @@ struct QualityPanel: View {
     private func tests(_ s: EvalSuite) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Acceptance tests").font(.system(size: 12, weight: .medium))
+                Text("Acceptance tests").font(.ui.weight(.medium))
                 Spacer()
                 Button(vm.copied ? "Copied" : "Copy tests") { vm.copyTests() }
-                    .controlSize(.small)
+                    .buttonStyle(QuietButtonStyle())
             }
             // Same reason as the issue list: two cases can share a name and an empty input.
             ForEach(Array(s.cases.enumerated()), id: \.offset) { _, c in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(c.name).font(.system(size: 11, weight: .medium))
+                    Text(c.name).font(.ui)
                     if !c.trap.isEmpty {
-                        Text(c.trap).font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text(c.trap).font(.meta).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -179,32 +172,30 @@ private struct ScoreRow: View {
     let label: String
     let value: Int
     let suffix: String
+    /// The rubric is the one figure that carries the accent; the other rows are neutral steps.
+    var lead = false
     var help: String? = nil
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(label).font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 64, alignment: .leading)
+            Text(label).font(.meta).foregroundStyle(.secondary).frame(width: 64, alignment: .leading)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.08))
-                    Capsule().fill(tint.gradient)
+                    Capsule().fill(Color.white.opacity(0.08))
+                    Capsule().fill(lead ? Color.spark : Color.white.opacity(0.36))
                         .frame(width: max(2, geo.size.width * CGFloat(min(100, max(0, value))) / 100))
                 }
             }
-            .frame(height: 5)
+            .frame(height: 4)
             // Sizes to its own text. A fixed 52-point frame silently clipped "73/100 weighted"
             // mid-number, which is the worst possible thing to truncate on a score row.
             Text("\(value)\(suffix)")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(.figure.weight(lead ? .medium : .regular))
+                .foregroundStyle(lead ? Color.spark : Color.secondary)
                 .fixedSize()
                 .frame(minWidth: 52, alignment: .trailing)
         }
         .help(help ?? "")
-    }
-
-    private var tint: Color {
-        value >= 85 ? .green : (value >= 65 ? .yellow : .orange)
     }
 }
 
@@ -214,17 +205,18 @@ private struct IssueRow: View {
     let detail: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
+        // Severity as a proof mark in the margin: one mono letter in its colour, no filled tile.
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(severity.prefix(1).uppercased())
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 14, height: 14)
-                .background(RoundedRectangle(cornerRadius: 3).fill(color))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 11.5, weight: .medium))
+                .font(.figure.weight(.medium))
+                .foregroundStyle(color)
+                .frame(width: 12, alignment: .leading)
+                .help(severity)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.ui)
                     .fixedSize(horizontal: false, vertical: true)
                 if !detail.isEmpty {
-                    Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(detail).font(.meta).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -233,8 +225,8 @@ private struct IssueRow: View {
 
     private var color: Color {
         switch severity {
-        case "blocker": return .red
-        case "major": return .orange
+        case "blocker": return .bad
+        case "major": return .warn
         default: return .secondary
         }
     }

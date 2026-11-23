@@ -36,8 +36,8 @@ struct QuickBarView: View {
         .fixedSize(horizontal: false, vertical: true)
         .tint(.spark)
         .environment(\.colorScheme, .dark)
-        .animation(.smooth(duration: 0.25), value: vm.phase)
-        .animation(.smooth(duration: 0.25), value: vm.expanded)
+        .animation(.enter, value: vm.phase)
+        .animation(.enter, value: vm.expanded)
         .task {
             guard !vm.didAutoFetch, let e = store.selected, store.hasKey(e) else { return }
             vm.didAutoFetch = true
@@ -57,10 +57,6 @@ struct PromptBar: View {
     @FocusState private var focused: Bool
 
     private var canSend: Bool { !vm.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    private var greeting: String {
-        let first = profiles.profile.name.split(separator: " ").first.map(String.init)
-        return first.map { "Hi \($0), what should an AI do?" } ?? "What should an AI do?"
-    }
 
     private func send() {
         guard canSend, !vm.isBusy, vm.phase != .answering else { return }
@@ -76,23 +72,24 @@ struct PromptBar: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: 12) {
             AppMenu()
 
             // ↩ sends, ⌥↩ breaks the line; the field grows to eight lines, then scrolls.
-            TextField(greeting, text: $vm.draft, axis: .vertical)
+            TextField("Describe the task", text: $vm.draft, axis: .vertical)
                 .textFieldStyle(.plain)
-                .font(.system(size: 15))
+                .font(.entry)
                 // Shorter while the full result is open, so the stack still fits a small screen.
                 .lineLimit(1...(vm.expanded ? 3 : 8))
                 .focused($focused)
                 .onSubmit(submit)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 2) {
+            HStack(spacing: 4) {
                 if vm.phase != .idle && !vm.isBusy {
                     Button { vm.reset(); focused = true } label: {
-                        Image(systemName: "square.and.pencil").frame(width: 26, height: 26)
+                        Image(systemName: "square.and.pencil").frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
@@ -102,15 +99,22 @@ struct PromptBar: View {
                 TargetMenu()
                 OptionsMenu()
             }
-            .font(.system(size: 12))
+            .font(.ui)
             .tint(.secondary)   // the menus are quiet; only the send button carries the accent
+
+            // The key that will act, shown where it acts. After a result only ⌘↩ re-runs.
+            if canSend && !vm.isBusy && vm.phase != .answering {
+                Keycap(keys: vm.phase == .done ? "⌘↩" : "↩")
+                    .transition(.opacity)
+            }
 
             SendButton(canSend: canSend, action: {
                 vm.isBusy ? vm.cancel() : send()
             })
         }
-        .padding(.leading, 14).padding(.trailing, 10).padding(.vertical, 10)
-        .frame(minHeight: 58)
+        .padding(.leading, 16).padding(.trailing, 12).padding(.vertical, 12)
+        .frame(minHeight: 56)
+        .animation(.feedback, value: canSend)
         .card(radius: 18)
         .onAppear { focused = true }
         .onChange(of: ui.focusToken) { focused = true }
@@ -127,22 +131,22 @@ private struct SendButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: vm.isBusy ? "stop.fill" : "arrow.up")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(.white.opacity(live ? 1 : 0.5))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(live ? 1 : 0.4))
                 .frame(width: 32, height: 32)
-                .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(live ? Color.spark : Color.white.opacity(0.10)))
-                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .animation(.snappy(duration: 0.15), value: live)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(live ? Color.spark : Color.white.opacity(0.08)))
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .animation(.feedback, value: live)
         }
         .buttonStyle(.plain)
         .keyboardShortcut(vm.phase == .answering ? nil : KeyboardShortcut(.return, modifiers: .command))
         .disabled(!live)
-        .help(vm.isBusy ? "Stop" : "Improve (↩)")
+        .help(vm.isBusy ? "Stop" : "Improve")
     }
 }
 
-/// The spark on the left of the bar: Settings, New prompt, Quit.
+/// The app's own `>_` mark on the left of the bar: Settings, New prompt, Hide, Quit.
 private struct AppMenu: View {
     @EnvironmentObject var vm: ImproverViewModel
     @EnvironmentObject var ui: QuickBarUI
@@ -157,9 +161,7 @@ private struct AppMenu: View {
             Button("Quit Prompt Improver") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")
         } label: {
-            Image(systemName: "sparkle")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(Color.spark)
+            Image(nsImage: PromptGlyph.image)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -209,4 +211,26 @@ private struct OptionsMenu: View {
         .fixedSize()
         .help("\(vm.rigor.rawValue): \(vm.rigor.blurb) · Questions \(vm.askQuestions ? "on" : "off")")
     }
+}
+
+/// The chevron and cursor from the logo, drawn in the accent: the bar's mark. An NSImage rather
+/// than SwiftUI shapes, because a borderless menu's label renders images reliably and views not.
+enum PromptGlyph {
+    static let image: NSImage = {
+        let img = NSImage(size: NSSize(width: 20, height: 20), flipped: true) { _ in
+            NSColor(Color.spark).set()
+            let chevron = NSBezierPath()
+            chevron.lineWidth = 2
+            chevron.lineCapStyle = .round
+            chevron.lineJoinStyle = .round
+            chevron.move(to: NSPoint(x: 4, y: 5))
+            chevron.line(to: NSPoint(x: 9.5, y: 10))
+            chevron.line(to: NSPoint(x: 4, y: 15))
+            chevron.stroke()
+            NSBezierPath(roundedRect: NSRect(x: 11, y: 13.5, width: 6, height: 2), xRadius: 1, yRadius: 1).fill()
+            return true
+        }
+        img.isTemplate = false
+        return img
+    }()
 }
