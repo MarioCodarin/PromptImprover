@@ -1158,6 +1158,32 @@ public enum SelfTest {
         check("prompts: repair forbids appending",
               MetaPrompts.repair.contains("Fix by replacing, not appending"))
 
+        // MARK: Budget
+
+        // Effort is only ever lowered on the JSON stages. Mapping "off" to "low" made a
+        // non-reasoning setup reason, and a write stage must keep exactly what the user chose.
+        check("budget: JSON stages lower a high effort to low", CallKind.clarify.effort(from: "high") == "low")
+        check("budget: JSON stages never raise off to low", CallKind.critique.effort(from: "off") == "off")
+        check("budget: no effort configured sends none", CallKind.tests.effort(from: nil) == nil)
+        check("budget: the write keeps the user's effort", CallKind.write.effort(from: "max") == "max")
+        // Ceilings belong to the Anthropic wire only: chat-completions gateways count reasoning
+        // inside max_tokens, and a capped clarify came back empty.
+        let opts = LLMClient.Options.call(.clarify, budget: .unbounded(), endpointEffort: nil)
+        check("budget: no max_tokens on the chat-completions wire", opts.maxTokens == nil && opts.outputCeiling == 1200)
+
+        // The watchdog waits longer for the first line than between lines: a reasoning model on a
+        // chat-completions gateway is silent while it thinks.
+        let t0 = Date()
+        let dog = Watchdog(stall: 5, firstByte: 60, deadline: t0.addingTimeInterval(600))
+        check("watchdog: silence before the first line is not a stall at 30 s",
+              dog.check(now: t0.addingTimeInterval(30)) == nil)
+        dog.touch()
+        check("watchdog: silence after the reply started is a stall",
+              dog.check(now: Date().addingTimeInterval(10)) == .stall)
+        let late = Watchdog(stall: 5, firstByte: 60, deadline: t0.addingTimeInterval(1))
+        check("watchdog: the deadline outranks the first-byte allowance",
+              late.check(now: t0.addingTimeInterval(2)) == .deadline)
+
         // MARK: Report
 
         let total = passes + failures.count

@@ -88,7 +88,11 @@ final class ImproverViewModel: ObservableObject {
     private var runID = 0
     /// The last finished, linted prompt and its evidence, restored if a later stage is interrupted.
     private var lastGood: (output: String, history: [ChatMessage], lint: PromptLinter.Report?, critique: Critique?)?
-    private var startedAt = Date()
+    /// Time the model was working, not wall clock: answering questions and the idle time before
+    /// a refine are excluded. `workedBefore` is what earlier stages of this run already spent;
+    /// `streamStarted` is when the stage in flight began.
+    private var workedBefore: TimeInterval = 0
+    private var streamStarted = Date()
 
     var isBusy: Bool { phase.isBusy }
     /// A run owns the error banner from its first stage until it finishes, including while it
@@ -133,7 +137,7 @@ final class ImproverViewModel: ObservableObject {
         diagnosis = nil; critique = nil; lint = nil; evalSuite = nil; calls = 0
         repairOutcome = .none; repairNote = nil; timedOut = false
         tokensIn = 0; tokensOut = 0
-        startedAt = Date(); elapsed = 0
+        workedBefore = 0; streamStarted = Date(); elapsed = 0
 
         // `askQuestions` decides whether the run stops for answers, not whether clarify happens:
         // its defaults and findings feed the writer either way.
@@ -150,6 +154,7 @@ final class ImproverViewModel: ObservableObject {
                 let d = try await pipeline.clarify()
                 guard run == runID, !Task.isCancelled else { return }
                 calls += 1
+                workedBefore = Date().timeIntervalSince(streamStarted)
                 diagnosis = d
                 analysis = render(d)
                 questions = d.questions
@@ -178,6 +183,7 @@ final class ImproverViewModel: ObservableObject {
         phase = .generating
         output = ""
         rated = nil
+        streamStarted = Date()
         let stream = pipeline.compose(diagnosis: diagnosis, questions: questions, priorCalls: calls)
         task = Task { await consume(stream, run: run) }
     }
@@ -196,6 +202,9 @@ final class ImproverViewModel: ObservableObject {
         phase = .generating
         rated = nil
         critique = nil; evalSuite = nil; repairOutcome = .none; repairNote = nil; timedOut = false
+        // A refine reports its own time, not the time since the first run began.
+        workedBefore = 0
+        streamStarted = Date()
         let stream = pipeline.refine(current: current, history: history, instruction: instr, priorCalls: calls)
         task = Task { await consume(stream, run: run) }
     }
@@ -229,6 +238,8 @@ final class ImproverViewModel: ObservableObject {
             lastGood = (output, history, report, critique)
         case .critique(let c):
             critique = c
+            // The review describes the text `lastGood` holds; a Stop during repair must keep both.
+            lastGood?.critique = c
         case .repair(let r):
             switch r {
             case .none: repairOutcome = .none; repairNote = nil
@@ -244,10 +255,15 @@ final class ImproverViewModel: ObservableObject {
             evalSuite = r.tests
             history = r.history
             timedOut = r.endedBy == .timedOut
+            switch r.repair {
+            case .none: repairOutcome = .none; repairNote = nil
+            case .applied: repairOutcome = .applied; repairNote = nil
+            case .reverted(let why): repairOutcome = .reverted; repairNote = why
+            }
             calls = r.calls
             tokensIn = r.tokensIn
             tokensOut = r.tokensOut
-            elapsed = Date().timeIntervalSince(startedAt)
+            elapsed = workedBefore + r.elapsed
             lastGood = nil
             phase = .done
         }
@@ -267,7 +283,7 @@ final class ImproverViewModel: ObservableObject {
             evalSuite = nil
         }
         // A stopped run still spent what it spent.
-        elapsed = Date().timeIntervalSince(startedAt)
+        elapsed = workedBefore + Date().timeIntervalSince(streamStarted)
         if let usage = client?.usage {
             tokensIn = usage.inputTokens
             tokensOut = usage.outputTokens

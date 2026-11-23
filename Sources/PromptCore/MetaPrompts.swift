@@ -179,13 +179,15 @@ public enum MetaPrompts {
         Write every string in the language of the draft. Reply with JSON only, no prose, no fence:
         {
           "brief": "2-3 sentences: what the user wants and what would most change the result",
-          "task_type": "writing",
-          "risk": "low",
-          "findings": [{"code": "D02", "severity": "major", "quote": "exact words from the draft", "fix": "one sentence"}],
+          "task_type": "research|writing|code|analysis|design|planning|operations|other",
+          "risk": "low|medium|high",
+          "findings": [{"code": "D02", "quote": "exact words from the draft", "fix": "one sentence"}],
           "questions": [{"question": "short", "why": "what the answer changes", "options": ["a", "b"], "default": "a"}],
           "assumptions": ["a default you would apply if the user says nothing"]
         }
-        Finding codes: \(Defect.all.prefix(12).map { "\($0.code) \($0.title)" }.joined(separator: "; ")).
+        Use only these finding codes; each one's severity is fixed by the code: \
+        \(Defect.all.filter { $0.severity != .minor }.map { "\($0.code) \($0.title)" }.joined(separator: "; ")).
+        Omit polish: report only what would make the result wrong or force rework.
         """
     }
 
@@ -324,22 +326,6 @@ public enum MetaPrompts {
             """)
         }
 
-        // Axis notes only for the axes the analyzer marked down: the writer needs to know which
-        // dimensions are weak, and it cannot know that from a defect list that names symptoms.
-        let weak = Axis.allCases.compactMap { axis -> String? in
-            guard let v = diagnosis.scores[axis.rawValue], v.score <= 2, !v.note.isEmpty else { return nil }
-            return "- \(axis.title) (\(v.score)/4): \(v.note)"
-        }
-        if !weak.isEmpty {
-            parts.append("""
-            <weak_axes>
-            The reviewer scored these below the bar. The rubric you are being judged against is in your \
-            instructions; raise each of these to a 4 or state why it does not apply.
-            \(weak.joined(separator: "\n"))
-            </weak_axes>
-            """)
-        }
-
         parts.append("Write the improved prompt now.")
         return parts.joined(separator: "\n\n")
     }
@@ -371,6 +357,8 @@ public enum MetaPrompts {
         is a blocker.
         - Medium: a chat message with autonomy sections is padded; an agent prompt with no \
         verification is under-specified.
+        - Contract: the output pins format, length with a number, language, and at least one \
+        exclusion. Do not reward length.
         </passes>
 
         Blocker = fails on a normal input. Major = forces rework. Minor = polish; report at most two. \

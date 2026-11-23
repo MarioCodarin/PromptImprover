@@ -9,13 +9,12 @@ struct QualityBadge: View {
         Text(text)
             .font(.figure)
             .foregroundStyle(.tertiary)
-            .help("Rubric is the critic's weighted judgement of twelve axes; its run-to-run spread "
-                  + "on identical text is \(RubricNoise.measuredSpread) points, so read it as a band. "
-                  + "Structure is the deterministic linter: same input, same score, every time.")
+            .help("Structure is the deterministic linter: same input, same score, every time. "
+                  + "Review (Deep) lists quoted defects the linter cannot see, such as invented facts.")
     }
 }
 
-/// The evidence behind the prompt: what the critic scored, what the linter caught, and the
+/// The evidence behind the prompt: what the review found, what the linter caught, and the
 /// acceptance tests when the run was deep enough to produce them.
 struct QualityPanel: View {
     @EnvironmentObject var vm: ImproverViewModel

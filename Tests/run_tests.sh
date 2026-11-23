@@ -117,13 +117,14 @@ expect "a truncated reply still counts the tokens it spent" 2 "spent: 4200 in" \
 expect "an unreachable host reports an error" 2 "" \
   -- "$BIN" --e2e "http://127.0.0.1:1/v1" --key k --model mock --rigor Fast
 
-# The two time limits. A server that goes silent mid-write is cut by the stall watchdog (and its
-# one retry), not held for ten minutes; the mock sleeps 30 s, so a pass here is a pass in ~6 s.
+# The two time limits. A server that starts a reply and then goes silent is cut by the stall
+# watchdog and retried within the budget, not held for ten minutes.
 T0=$(date +%s)
 expect "a silent gateway is cut off by the stall watchdog" 2 "stopped sending" \
-  -- "$BIN" --e2e "$BASE/stall/v1" --key k --model mock --rigor Fast --stall 2 --deadline 12
+  -- "$BIN" --e2e "$BASE/stall/v1" --key k --model mock --rigor Fast --stall 2 --deadline 40
 T1=$(date +%s)
-if (( T1 - T0 < 20 )); then ok "the stall cut-off took $((T1 - T0))s, not the mock's 30"; else bad "stall took $((T1 - T0))s"; fi
+# Four 2 s stalls plus the 1/3/8 s backoff ladder: ~20 s, well under the mock's 30 s silence.
+if (( T1 - T0 < 28 )); then ok "the stall cut-off took $((T1 - T0))s, not the mock's 30"; else bad "stall took $((T1 - T0))s"; fi
 
 # A write slower than the whole budget ends on the deadline, with an error: there is no finished
 # prompt to fall back on, and a fragment is never shipped.

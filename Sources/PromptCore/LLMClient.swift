@@ -204,10 +204,14 @@ public struct LLMClient: LLMTransport {
         /// `endpointEffort` is the user's setting; JSON stages drop to "low" when one is set at all,
         /// so an endpoint with no effort configured is never sent the parameter.
         public static func call(_ kind: CallKind, budget: Budget, endpointEffort: String?) -> Options {
-            let effort = endpointEffort.map { kind.prefersLowEffort ? "low" : $0 }
-            return Options(temperature: kind.isJSON ? 0 : nil, maxTokens: kind.maxTokens,
-                           jsonMode: kind.isJSON, reasoningEffort: effort, budget: budget)
+            var o = Options(temperature: kind.isJSON ? 0 : nil, jsonMode: kind.isJSON,
+                            reasoningEffort: kind.effort(from: endpointEffort), budget: budget)
+            o.outputCeiling = kind.maxTokens
+            return o
         }
+        /// The stage's ceiling for the Anthropic wire, where `max_tokens` is mandatory. Never put
+        /// on the chat-completions wire (see `CallKind.maxTokens`).
+        public var outputCeiling: Int?
         public static let `default` = Options()
         public static func json(temperature: Double = 0) -> Options { .init(temperature: temperature, jsonMode: true) }
     }
@@ -295,6 +299,9 @@ public struct LLMClient: LLMTransport {
         if rejected.contains("temperature") { opts.temperature = nil }
         if rejected.contains("max_tokens") { opts.maxTokens = nil }
         if rejected.contains("reasoning_effort") { opts.reasoningEffort = nil }
+        // A lowered effort the gateway refused falls back to the user's own value, not to none.
+        if let e = opts.reasoningEffort, e != endpoint.reasoningEffort,
+           rejected.contains("reasoning_effort=\(e)") { opts.reasoningEffort = endpoint.reasoningEffort }
         var attempt = 0
         // Counted separately from `attempt`: a parameter fallback is not a transient failure and
         // must not consume the retries meant for a 503.
@@ -311,6 +318,11 @@ public struct LLMClient: LLMTransport {
                 }
                 return
             } catch {
+                // A cancel is not a failure to classify: wrapping it in `.api` hid it from every
+                // `catch is CancellationError` downstream.
+                if error is CancellationError || (error as? URLError)?.code == .cancelled || Task.isCancelled {
+                    throw CancellationError()
+                }
                 let err = error as? LLMError ?? .api(error.localizedDescription)
 
                 // A gateway that rejects one optional parameter should cost a retry, not the run.
@@ -340,9 +352,15 @@ public struct LLMClient: LLMTransport {
                         rejected.add("stream_options")
                         continue
                     }
-                    if opts.reasoningEffort != nil, lower.contains("reasoning_effort") || lower.contains("reasoning") {
-                        opts.reasoningEffort = nil
-                        rejected.add("reasoning_effort")
+                    if let e = opts.reasoningEffort, lower.contains("reasoning_effort") || lower.contains("reasoning") {
+                        if e != endpoint.reasoningEffort {
+                            // Only the lowered value was refused; the user's setting may be fine.
+                            rejected.add("reasoning_effort=\(e)")
+                            opts.reasoningEffort = endpoint.reasoningEffort
+                        } else {
+                            opts.reasoningEffort = nil
+                            rejected.add("reasoning_effort")
+                        }
                         continue
                     }
                 }
@@ -364,15 +382,17 @@ public struct LLMClient: LLMTransport {
                     [.timedOut, .networkConnectionLost, .notConnectedToInternet,
                      .secureConnectionFailed].contains($0.code)
                 } ?? false
+                        // A permanent error stays itself even past the deadline: a 401 is not a timeout.
+                guard err.isTransient || transportTransient else { throw err }
                 if opts.budget.isExpired { throw LLMError.deadline }
-                guard !yieldedAnything, transientCount < delays.count,
-                      err.isTransient || transportTransient, !Task.isCancelled else { throw err }
+                guard !yieldedAnything, transientCount < delays.count else { throw err }
                 // Count transient failures separately from parameter fallbacks: a gateway that
                 // rejected two optional parameters must not eat the retries meant for a 503.
                 transientCount += 1
                 let base = delays[transientCount - 1]
-                // A retry that cannot finish inside the budget is not worth its backoff.
-                guard opts.budget.remaining > base + 5 else { throw err }
+                // A retry that cannot finish inside the budget is not worth its backoff; the budget
+                // is then the reason the call ends, so say so (the pipeline keeps what it has).
+                guard opts.budget.remaining > base + 5 else { throw LLMError.deadline }
                 let jitter = Double.random(in: 0...0.4) * base
                 try await Task.sleep(nanoseconds: UInt64((base + jitter) * 1_000_000_000))
             }
@@ -387,7 +407,7 @@ public struct LLMClient: LLMTransport {
         let budget = options.budget
         if budget.isExpired { throw LLMError.deadline }
         var req = try request(endpoint.format == .openAI ? "chat/completions" : "messages",
-                              timeout: min(budget.stallTimeout, max(1, budget.remaining)))
+                              timeout: min(budget.firstByteTimeout, max(1, budget.remaining)))
         req.httpMethod = "POST"
         req.httpBody = try JSONSerialization.data(withJSONObject: body(system, messages, model, options))
         usage.beginCall()
@@ -402,7 +422,8 @@ public struct LLMClient: LLMTransport {
         // The watchdog. URLSession's idle timer covers the wait for headers; this covers the body,
         // and the run's deadline, by cancelling the data task. The loop below then ends with a
         // cancellation, which is translated back into whichever limit fired.
-        let watchdog = Watchdog(stall: budget.stallTimeout, deadline: budget.deadline)
+        let watchdog = Watchdog(stall: budget.stallTimeout, firstByte: budget.firstByteTimeout,
+                                deadline: budget.deadline)
         let guardTask = Task { [task = bytes.task] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
@@ -490,7 +511,7 @@ public struct LLMClient: LLMTransport {
             return b
         case .anthropic:
             var b: [String: Any] = ["model": model, "stream": true,
-                                    "max_tokens": o.maxTokens ?? 16000,
+                                    "max_tokens": o.maxTokens ?? o.outputCeiling ?? 16000,
                                     "system": system, "messages": msgs]
             if let t = o.temperature { b["temperature"] = t }
             return b
@@ -559,13 +580,17 @@ final class Watchdog: @unchecked Sendable {
     enum Limit { case stall, deadline }
     private let lock = NSLock()
     private var last = Date()
+    private var started = false
     private var _fired: Limit?
     let stall: TimeInterval
+    let firstByte: TimeInterval
     let deadline: Date
 
-    init(stall: TimeInterval, deadline: Date) { self.stall = stall; self.deadline = deadline }
+    init(stall: TimeInterval, firstByte: TimeInterval, deadline: Date) {
+        self.stall = stall; self.firstByte = firstByte; self.deadline = deadline
+    }
 
-    func touch() { lock.withLock { last = Date() } }
+    func touch() { lock.withLock { last = Date(); started = true } }
     var fired: Limit? { lock.withLock { _fired } }
 
     /// Records and returns the limit that has been passed, if any. The first one to fire wins.
@@ -573,7 +598,7 @@ final class Watchdog: @unchecked Sendable {
         lock.withLock {
             if _fired == nil {
                 if now >= deadline { _fired = .deadline }
-                else if now.timeIntervalSince(last) > stall { _fired = .stall }
+                else if now.timeIntervalSince(last) > (started ? stall : firstByte) { _fired = .stall }
             }
             return _fired
         }

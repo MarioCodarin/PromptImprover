@@ -14,11 +14,16 @@ import Foundation
 ///   and the pipeline returns the best prompt it already has.
 public struct Budget: Sendable {
     public var deadline: Date
+    /// Silence allowed *between* chunks, once the reply has started.
     public var stallTimeout: TimeInterval
+    /// Silence allowed before the first line. Much longer, because chat-completions gateways send
+    /// nothing while a reasoning model thinks; 45 s here cut (and re-billed) legitimate thinking.
+    public var firstByteTimeout: TimeInterval
 
-    public init(deadline: Date, stallTimeout: TimeInterval = 45) {
+    public init(deadline: Date, stallTimeout: TimeInterval = 45, firstByteTimeout: TimeInterval = 180) {
         self.deadline = deadline
         self.stallTimeout = stallTimeout
+        self.firstByteTimeout = firstByteTimeout
     }
 
     /// Seconds left, never negative.
@@ -37,9 +42,9 @@ public struct Budget: Sendable {
         return Budget(deadline: start.addingTimeInterval(seconds))
     }
 
-    /// No practical limit. For refine, which is one call the user is watching.
-    public static func unbounded(stallTimeout: TimeInterval = 45) -> Budget {
-        Budget(deadline: .distantFuture, stallTimeout: stallTimeout)
+    /// No deadline; the stall limits still apply. Used by refine, one call the user is watching.
+    public static func unbounded() -> Budget {
+        Budget(deadline: .distantFuture)
     }
 }
 
@@ -48,8 +53,10 @@ public struct Budget: Sendable {
 public enum CallKind: String, Sendable, CaseIterable {
     case clarify, write, repair, critique, tests, refine
 
-    /// Output ceiling. Roughly twice the largest reply each stage should produce, so a normal
-    /// reply never truncates and a runaway one stops early instead of streaming for minutes.
+    /// Output ceiling, sent on the Anthropic wire only (where `max_tokens` is required anyway).
+    /// Roughly twice the largest reply each stage should produce. Not sent on chat-completions:
+    /// many gateways count reasoning tokens inside `max_tokens`, so a 1200-token clarify came back
+    /// empty and truncated. There the deadline bounds a runaway reply instead.
     public var maxTokens: Int {
         switch self {
         case .clarify: return 1200
@@ -59,8 +66,8 @@ public enum CallKind: String, Sendable, CaseIterable {
         }
     }
 
-    /// Classification and review do not need deep reasoning; writing does. Low effort on the three
-    /// JSON stages is where most of the wall-clock saving comes from on a reasoning model.
+    /// Classification and review do not need deep reasoning; writing does. Lowering effort on the
+    /// three JSON stages is where most of the wall-clock saving comes from on a reasoning model.
     public var prefersLowEffort: Bool {
         switch self {
         case .clarify, .critique, .tests: return true
@@ -69,4 +76,11 @@ public enum CallKind: String, Sendable, CaseIterable {
     }
 
     public var isJSON: Bool { self == .clarify || self == .critique || self == .tests }
+
+    /// The effort to send: the user's, lowered to "low" for JSON stages — never raised. "off",
+    /// "low", "none", "minimal" and unknown values pass through as the user set them.
+    public func effort(from user: String?) -> String? {
+        guard let user, prefersLowEffort else { return user }
+        return ["medium", "high", "xhigh", "max"].contains(user.lowercased()) ? "low" : user
+    }
 }

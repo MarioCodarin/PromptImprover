@@ -137,6 +137,10 @@ public struct PromptPipeline {
                     let text = PromptEngine.finalize(written)
                     guard !text.isEmpty else { throw LLMError.api("The model returned an empty response.") }
                     var best = Candidate(text: text, lint: lint(text))
+                    // The finalized text replaces the last streamed one (which may still carry a
+                    // wrapper fence) before `.lint`: a consumer saves the text on screen as the
+                    // prompt that score describes.
+                    out.yield(.partial(text))
                     out.yield(.lint(best.lint))
 
                     guard request.rigor.verifies else {
@@ -166,7 +170,8 @@ public struct PromptPipeline {
                     let issues = RepairGuard.issues(critique: critique ?? .empty, lint: best.lint)
                     if !issues.isEmpty {
                         guard budget.remaining > Self.minimumRepairTime else {
-                            return finish(best, critique: critique, tests: nil, repair: .none, endedBy: .timedOut)
+                            return finish(best, critique: critique, tests: nil,
+                                          repair: .reverted("not enough time left for a repair"), endedBy: .timedOut)
                         }
                         out.yield(.stage(.repair))
                         var partial = ""
@@ -175,6 +180,9 @@ public struct PromptPipeline {
                                 partial = p
                                 out.yield(.partial(p))
                             }
+                            // A cancelled stream ends quietly, without throwing. Without this a
+                            // fragment was judged, accepted, and the tests call still went out.
+                            try Task.checkCancellation()
                             calls += 1
                             let revised = PromptEngine.finalize(partial)
                             let after = lint(revised)
@@ -245,10 +253,13 @@ public struct PromptPipeline {
             let task = Task {
                 do {
                     out.yield(.stage(.write))
-                    let raw = try await streamed(engine.revise(history: messages, budget: .for(.fast, from: started)), into: out)
+                    // No deadline: one call the user is watching, and a full rewrite on a reasoning
+                    // model can pass a minute. The stall watchdog still ends a dead stream.
+                    let raw = try await streamed(engine.revise(history: messages, budget: .unbounded()), into: out)
                     let text = PromptEngine.finalize(raw)
                     guard !text.isEmpty else { throw LLMError.api("The model returned an empty response.") }
                     let report = PromptLinter.lint(text, target: request.target, unansweredQuestions: 0, draft: request.draft)
+                    out.yield(.partial(text))
                     out.yield(.lint(report))
                     out.yield(.finished(Result(prompt: text, lint: report, critique: nil, tests: nil, repair: .none,
                                                endedBy: .complete, calls: priorCalls + 1,
