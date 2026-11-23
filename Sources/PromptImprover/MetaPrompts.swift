@@ -40,6 +40,119 @@ enum PromptTarget: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The length envelope the structural check enforces, stated to the writer so it can aim.
+    var lengthTarget: String {
+        switch self {
+        case .agentTask: return "400 to 900 words (hard ceiling 1400)"
+        case .systemPrompt: return "350 to 800 words (hard ceiling 1100)"
+        case .chat: return "60 to 300 words (hard ceiling 500)"
+        }
+    }
+
+    /// A worked example in this target's own shape.
+    ///
+    /// One exemplar served all three targets before, and its shape was the agent-task skeleton —
+    /// so a system prompt and a chat message were shown sections they are told to drop, and the
+    /// agent one failed the rubric it was modelling (no stopping condition per phase, no action
+    /// classes with reasons). Each example below scores 4 on the axes it demonstrates.
+    var exemplar: String {
+        switch self {
+        case .agentTask:
+            return """
+            The example shows the shape, not the content. Never reuse its subject, numbers or wording.
+
+            # Add a retry budget to the outbound webhook sender
+
+            ## Objective
+            Stop the sender retrying a dead endpoint forever. Two incidents this quarter came from a worker \
+            pinned on a 404 for six hours: the queue backed up and every other tenant stalled behind it.
+
+            ## Inputs
+            - `internal/webhook/sender.go` — the retry loop.
+            - `docs/webhooks.md` — the delivery contract we promised clients.
+
+            ## Requirements
+            - Cap retries at 5 attempts, backoff 2s to 60s, jittered by 20%.
+            - Treat 4xx except 429 as permanent: one attempt, no retry.
+            - Emit a counter per outcome so queue depth is observable.
+
+            ## Constraints and non-goals
+            - No change to the public `Send` signature. Out of scope: the consumer side.
+            - Budget: one pull request, under 300 changed lines.
+
+            ## Approach
+            1. Read the sender and the contract. Stop once you can name every retry branch.
+            2. Put the budget behind the existing loop. Stop when all three cases above are handled.
+            3. Add table tests for permanent, transient and exhausted. Stop when all three fail against \
+            the old code.
+
+            ## Output contract
+            One pull request. Description naming the files, the tests and the rollback step. English, \
+            under 250 words.
+
+            ## Success criteria
+            - `go test ./internal/webhook/...` returns 0.
+            - A 404 makes exactly one attempt and a 500 makes five; a test proves both.
+            - The `Send` signature is unchanged in the diff.
+
+            ## Verification
+            Run the package tests and paste the summary line. Then re-read the diff against each \
+            criterion above, one at a time.
+
+            ## Priorities when instructions conflict
+            The delivery contract outranks the current code. If they disagree, follow the contract and \
+            say which reading you chose.
+
+            ## Autonomy and escalation
+            Proceed without asking. Confirm first before changing the public `Send` signature, deleting \
+            an existing test, or touching a second package: the first is visible to every caller, the \
+            others are irreversible in review. Obstacles never justify disabling a test.
+
+            ## Assumptions
+            - "Dead endpoint" means the host resolves but returns 4xx. DNS failure is out of scope.
+            """
+        case .systemPrompt:
+            return """
+            The example shows the shape, not the content. Never reuse its subject or wording.
+
+            You are the support triage assistant for a B2B billing product.
+
+            ## Purpose
+            Classify each inbound ticket and draft the first reply, so a human reviews instead of \
+            starting from nothing. The readers are finance staff, not engineers, and they are already \
+            frustrated by the time they write.
+
+            ## How you work
+            Read the ticket and any linked invoice before writing. Classify into one of: billing-error, \
+            access, refund-request, other. Then draft one reply covering what happened, what you did, and \
+            what happens next.
+
+            ## Priorities when instructions conflict
+            Never state a refund amount you cannot see on an invoice. If the ticket asks for one and no \
+            invoice is linked, classify as billing-error and ask for the invoice number instead.
+
+            ## Output contract
+            Two fields: `category`, one of the four above; `reply`, plain prose under 120 words with no \
+            greeting formula and no sign-off.
+
+            ## Boundaries
+            Never state a policy that is not in the linked documentation. Never close a ticket. If a \
+            ticket is abusive, answer it once, factually, and flag it for a human.
+
+            ## Assumptions
+            - Ticket text is the only signal; there is no call recording or chat history to consult.
+            """
+        case .chat:
+            return """
+            The example shows the shape, not the content. Never reuse its subject or wording.
+
+            Summarise the incident report below in one paragraph, then list the three decisions it leaves \
+            open. Plain prose, under 150 words, no preamble. Quote the report for every claim you make; \
+            if it does not state a cause, write that the cause is unstated rather than inferring one.
+            """
+        }
+    }
+
     /// Section skeleton the writer is told to adapt. Empty sections get dropped, not filled.
     var skeleton: String {
         switch self {
@@ -203,47 +316,60 @@ enum MetaPrompts {
         deliverable yourself is the one failure this tool exists to prevent.
 
         <principles>
-        1. Intent before wording. State the outcome and why it matters. Models generalise from a purpose \
-        better than from a rule list, and a purpose is what lets them make the thousand small decisions \
-        you did not foresee.
-        2. Right altitude. Specific enough to steer, general enough to cover the cases nobody listed. \
-        Brittle if-else instructions and vague aspirations are the two failure modes; stay between them.
-        3. Every line earns its place. Context the model can infer is noise that costs attention. If a \
-        sentence could be deleted without changing the output, delete it.
-        4. Contradictions are the worst defect. Before you finish, list the rules that constrain the same \
-        action and check that no two disagree. When two legitimate goals conflict (speed vs thoroughness, \
-        autonomy vs safety), resolve it explicitly with a priority order instead of leaving both rules in.
-        5. Say what to do, not only what to avoid. A prohibition without an alternative just moves the \
-        failure. When a "never" is necessary, give the reason and the replacement behaviour.
-        6. Success criteria must be checkable by someone who did not do the work: a command, a field, a \
-        number, a comparison. "High quality" is not a criterion.
-        7. Verification is part of the task, not an afterthought. Say how to prove each criterion and what \
-        evidence to show. A result nobody checked is a guess.
-        8. Name the failure policy: missing input, ambiguous request, partial success, out-of-scope ask. \
-        Each gets a stated response, including when to stop and ask.
-        9. Autonomy is a decision, not a mood. Default to acting; list the action classes that need \
-        confirmation (destructive, irreversible, visible to others, costly) with the reason. Never let an \
+        One principle per rubric axis. The critic scores you on exactly these twelve, so a prompt that \
+        satisfies them is a prompt that passes.
+
+        1. Goal. State the outcome and why it matters. A model generalises from a purpose better than \
+        from a rule list, and the purpose is what lets it make the thousand decisions you did not \
+        foresee. Specific enough to steer, general enough to cover cases nobody listed.
+        2. Context. Give only what the model cannot infer, and say why the task exists now. Context the \
+        model can infer is noise that costs attention. Long supplied material goes in tags, before the \
+        instructions that use it.
+        3. Inputs. Name what exists, where it is, and what is missing. Never assume a file, repository, \
+        tool or audience. If there is no input, say so and forbid inventing one.
+        4. Deliverable. Fix the output contract: format, structure, length with a number, language, and \
+        at least one thing it must not contain. An unfixed format is the commonest cause of rework.
+        5. Criteria. Every success criterion must be checkable by someone who did not do the work: a \
+        command, a field, a number, a comparison. "High quality" is not a criterion. Each criterion \
+        names the method the executor actually has.
+        6. Constraints. Say what is out of scope and what the budget is. State what to do, not only what \
+        to avoid: a prohibition without an alternative just moves the failure. When a "never" is \
+        necessary, give the reason and the replacement behaviour.
+        7. Procedure. Order the work, and give each phase a stopping condition — what tells you it is \
+        done. An ordered list with no stopping condition is a wish. Skip this when the task is one step.
+        8. Autonomy. Default to acting. List the action classes that need confirmation first — \
+        destructive, irreversible, visible to others, costly — each with the reason. Never let an \
         obstacle justify a destructive shortcut.
-        10. Research, when the task needs facts the model cannot know (current prices, versions, law, \
-        APIs, competitors, anything dated): instruct a search, prefer primary sources, require a source \
-        and a retrieval date per claim, cross-check anything that decides the outcome, and separate what \
-        was confirmed from what was inferred. Never let the prompt imply a fact it did not supply.
-        11. Separate facts from design decisions. Never assert a fact about the world you were not \
-        given: prices, names, URLs, dates, counts, citations, testimonials, versions, availability. \
-        Limits and thresholds you impose on the work itself (word counts, file sizes, timeouts, \
-        thresholds, line budgets) are yours to choose — choose them deliberately, state the number, \
-        and list each one under Assumptions in one line. Anything a placeholder would leave unusable \
-        gets a marked placeholder instead: use {{LIKE THIS}} for a value only the user can supply.
-        12. No theatre. No "world-class expert" personas, no ALL-CAPS, no threats or bribes, no restating \
-        the request back. Calm, direct, reasoned language performs better on current models.
-        13. Do not tell a reasoning model to think step by step; it already reasons. Tell it what to reason \
-        about and what to show. Do not add chain-of-thought scaffolding to a chat prompt unless the task \
-        genuinely benefits from visible working.
-        14. One canonical example beats ten edge cases. Include an example only when a format or style is \
-        hard to describe in words, label it as illustrative, and keep it short.
-        15. The task is general. Do not assume a codebase, a repository, files, tools or an audience \
-        unless the request or the diagnosis supplies them.
+        9. Verification. Say how to prove each criterion and what evidence to show. A result nobody \
+        checked is a guess. Verification is part of the task, not an afterthought.
+        10. Consistency. Contradictions are the worst defect. List the rules that constrain the same \
+        action and check that no two disagree. When two legitimate goals conflict, resolve it with an \
+        explicit priority order instead of leaving both rules in. Define any term the executor must \
+        interpret.
+        11. Economy. Every line earns its place. No theatre: no "world-class expert" personas, no \
+        ALL-CAPS, no threats or bribes, no restating the request back. Calm, direct, reasoned language \
+        performs better on current models.
+        12. Robustness. Name the failure policy: missing input, ambiguous request, partial success, \
+        out-of-scope ask. Each gets a stated response, including when to stop and ask. Do not tell a \
+        reasoning model to think step by step; it already reasons — say what to reason about and what \
+        to show.
         </principles>
+
+        <facts>
+        These apply across every axis, and they are the two failures this tool exists to prevent.
+
+        - Research when the task needs facts the model cannot know: current prices, versions, law, APIs, \
+        competitors, anything dated. Instruct a search, prefer primary sources, require a source and a \
+        retrieval date per claim, cross-check whatever decides the outcome, and separate what was \
+        confirmed from what was inferred.
+        - Separate facts from design decisions. Never assert a fact about the world you were not given: \
+        prices, names, URLs, dates, counts, citations, testimonials, versions, availability. Limits and \
+        thresholds you impose on the work itself (word counts, file sizes, timeouts, line budgets) are \
+        yours to choose — choose deliberately, state the number, and list each under Assumptions in one \
+        line. Anything a placeholder would leave unusable gets one: {{LIKE THIS}}.
+        - One canonical example beats ten edge cases. Include one only when a format or style is hard to \
+        describe in words, label it as illustrative, and keep it short.
+        </facts>
 
         <structure>
         Markdown headings. Wrap any block of supplied material (documents, data, transcripts, code) in \
@@ -259,65 +385,16 @@ enum MetaPrompts {
         </structure>
 
         <exemplar>
-        The example below shows the shape, not the content. Never reuse its subject, numbers or wording.
-
-        # Competitive teardown: three espresso machine vendors
-
-        ## Objective
-        Produce a decision memo that tells our hardware team which of three vendors (A, B, C) can supply a \
-        58mm portafilter machine at our target unit cost, and why. The team uses it to pick two vendors for \
-        sample orders on 12 May.
-
-        ## Context
-        We ship 400 units per quarter, need CE and WEEE certification, and cannot accept lead times over 10 \
-        weeks. The March attempt stalled because vendor pricing pages quote ex-works prices with no freight.
-
-        ## Inputs
-        - `vendors.csv` in the repository root: name, contact, quoted price, minimum order quantity.
-        - Spec sheets are not local. Fetch them from each vendor's site.
-
-        ## Requirements
-        - Per vendor: landed unit cost in EUR at 400 units, lead time in weeks, certifications held, and one \
-        sentence on the largest supply risk.
-        - When a figure is not published, say so. Do not estimate.
-
-        ## Constraints and non-goals
-        - Public information only; no outreach to vendors.
-        - Out of scope: negotiation strategy, payment terms.
-        - Budget: 90 minutes, 12 sources maximum.
-
-        ## Approach
-        1. Read `vendors.csv` and list what is missing per vendor.
-        2. Find each vendor's current spec sheet and price list. Prefer the PDF spec sheet over reseller pages.
-        3. Cross-check each price against a second source. If they differ by more than 10%, report both and \
-        mark the figure contested.
-        4. Write the memo.
-
-        ## Output contract
-        Markdown: one section per vendor, then a comparison table with the four numeric columns, then a \
-        two-sentence recommendation. 600 words maximum. English.
-
-        ## Success criteria
-        - Every price carries a source URL and a retrieval date.
-        - Every unpublished cell says "not published"; no estimates anywhere.
-        - Landed cost in the table equals the quoted price plus the freight figure cited.
-        - A reader can name the two recommended vendors without reading the prose.
-
-        ## Verification
-        Before finishing, re-read the memo and test each success criterion, naming the source behind each \
-        price. If one fails, fix it rather than noting it.
-
-        ## Autonomy and escalation
-        Proceed without asking. Stop and ask only if fewer than two vendors publish a spec sheet, or if a \
-        vendor requires an account to see pricing.
-
-        ## Assumptions
-        - "Landed cost" excludes VAT, because finance adds it downstream.
+        \(target.exemplar)
         </exemplar>
 
         <output>
         Output the finished prompt and nothing else: no preamble, no commentary, no diff, no fence around \
         the whole thing. Write it in the language of the request.
+
+        Length: aim for \(target.lengthTarget). Past the ceiling, compliance drops — models start skipping \
+        sections and contradicting earlier rules. Cut a sentence that could be deleted before you cut a \
+        success criterion.
         </output>
         """
     }
@@ -507,10 +584,29 @@ enum MetaPrompts {
 
     // MARK: - Stage 5: acceptance tests
 
+    /// What one test case's input looks like, per target. Without this the suite writer guessed.
+    private static func medium(for target: PromptTarget) -> String {
+        switch target {
+        case .agentTask: return "task brief handed to an autonomous agent"
+        case .systemPrompt: return "reusable system prompt"
+        case .chat: return "single chat message"
+        }
+    }
+
+    private static func inputShape(for target: PromptTarget) -> String {
+        switch target {
+        case .agentTask: return "a short task brief a user would paste into an agent, including the messy ones"
+        case .systemPrompt: return "one user turn that a real conversation would open with"
+        case .chat: return "one message a user would type, in their own words"
+        }
+    }
+
     static func evalSuite(target: PromptTarget) -> String {
         """
         You write acceptance tests for a prompt. A test is an input that a weak version of the prompt \
         fails and a good version passes.
+
+        The prompt under test is a \(medium(for: target)). So each test's "input" is \(inputShape(for: target)).
 
         Rules:
         - 3 to 5 cases. Each one must exercise a different failure mode: a missing input, an ambiguous \

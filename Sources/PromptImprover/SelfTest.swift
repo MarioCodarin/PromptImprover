@@ -221,6 +221,85 @@ enum SelfTest {
         check("linter: thousands separators parse as numbers",
               !r5i.issues.contains { $0.id.hasPrefix("limit-conflict") }, r5i.issues.map(\.id).joined(separator: ","))
 
+        // A format declared per sentence is judged per sentence, not per document.
+        let twoFormats = syntheticPrompt(.agentTask) + "\nReturn the output as JSON.\nAlso emit a table.\n"
+        let r5j = PromptLinter.lint(twoFormats, target: .agentTask, unansweredQuestions: 0)
+        check("linter: a second format in its own sentence is caught",
+              r5j.majors.contains { $0.id == "format-conflict" }, r5j.issues.map(\.id).joined(separator: ","))
+
+        // "or" inside an unrelated sentence must not silence the format check.
+        let smuggled = syntheticPrompt(.agentTask) + "\nReturn the output as JSON.\nAlso return the log as CSV.\n"
+        let r5k = PromptLinter.lint(smuggled, target: .agentTask, unansweredQuestions: 0)
+        check("linter: an unrelated 'or' does not excuse two formats",
+              r5k.majors.contains { $0.id == "format-conflict" }, r5k.issues.map(\.id).joined(separator: ","))
+
+        let eitherOr = syntheticPrompt(.agentTask) + "\nReturn the output as JSON, or as CSV if the caller asks for a spreadsheet.\n"
+        let r5l = PromptLinter.lint(eitherOr, target: .agentTask, unansweredQuestions: 0)
+        check("linter: an either/or in the same sentence is allowed",
+              !r5l.issues.contains { $0.id == "format-conflict" })
+
+        // An instruction to the executor is not the model talking about the prompt.
+        let tellMe = syntheticPrompt(.agentTask) + "\nRun the migration, then let me know if the row count changed.\n"
+        let r5m = PromptLinter.lint(tellMe, target: .agentTask, unansweredQuestions: 0)
+        check("linter: 'let me know if' is an instruction, not meta", !r5m.issues.contains { $0.id == "meta" },
+              r5m.issues.map(\.id).joined(separator: ","))
+
+        // Two illustrative examples are what the writer is told to produce.
+        let examples = syntheticPrompt(.agentTask)
+            + "\nInput: `add two numbers`. Output: `{\"sum\": 3}`.\n\n```\n{\"sum\": 3}\n```\n\n"
+            + "Input: `greet`. Output: `{\"greeting\": \"hi\"}`.\n\n```\n{\"greeting\": \"hi\"}\n```\n"
+        let r5n = PromptLinter.lint(examples, target: .agentTask, unansweredQuestions: 0)
+        check("linter: two small examples are not an executed task", !r5n.issues.contains { $0.id == "executed" },
+              r5n.issues.map(\.id).joined(separator: ","))
+
+        // Live regression: a field used twice is one slot, not two.
+        let reused = syntheticPrompt(.agentTask) + "\nAddress it to {{NAME}}; sign it {{NAME}}.\n"
+        let r5o = PromptLinter.lint(reused, target: .agentTask, unansweredQuestions: 0)
+        check("linter: a repeated placeholder counts once", !r5o.issues.contains { $0.id == "placeholders" },
+              r5o.issues.map(\.id).joined(separator: ","))
+
+        // Live regression: a chat message records its decisions inline.
+        let inline = syntheticPrompt(.chat) + "\nAssumptions: a neutral relationship; two weeks' notice."
+        let r5p = PromptLinter.lint(inline, target: .chat, unansweredQuestions: 2)
+        check("linter: inline assumptions satisfy the chat target",
+              !r5p.issues.contains { $0.id == "silent-defaults" }, r5p.issues.map(\.id).joined(separator: ","))
+
+        // Live regression: a system prompt that opens with its role has stated its purpose.
+        let roleOpener = """
+        You draft resignation emails that leave the relationship intact.
+
+        ## How you work
+        Ask for the last day, then draft.
+
+        ## Output contract
+        Prose under 200 words.
+        """
+        let r5q = PromptLinter.lint(roleOpener, target: .systemPrompt, unansweredQuestions: 0)
+        check("linter: a role opening satisfies the purpose section",
+              !r5q.issues.contains { $0.id == "missing-purpose" }, r5q.issues.map(\.id).joined(separator: ","))
+
+        let noRole = "Here are some rules.\n\n## How you work\nBe nice.\n\n## Output contract\nProse.\n"
+        let r5r = PromptLinter.lint(noRole, target: .systemPrompt, unansweredQuestions: 0)
+        check("linter: a system prompt with no role still fails",
+              r5r.issues.contains { $0.id == "missing-purpose" })
+
+        // Live regression: a chat message labelled its decisions in prose, with no heading.
+        let proseAssumptions = syntheticPrompt(.chat) + """
+
+        Assumptions (already decided, do not ask):
+        - Recipient is the direct manager only.
+        - Standard notice, stated once.
+        """
+        let r5s = PromptLinter.lint(proseAssumptions, target: .chat, unansweredQuestions: 2)
+        check("linter: a prose assumption clause is read", !r5s.issues.contains { $0.id == "silent-defaults" },
+              r5s.issues.map(\.id).joined(separator: ","))
+
+        // ...but one sentence covering one decision does not cover four open questions.
+        let thinAssumptions = syntheticPrompt(.chat) + "\nAssumptions: a neutral relationship."
+        let r5t = PromptLinter.lint(thinAssumptions, target: .chat, unansweredQuestions: 4)
+        check("linter: too few recorded decisions still fails",
+              r5t.issues.contains { $0.id == "silent-defaults" })
+
         let mush = "hello there, just wondering if you could maybe help me out a bit with something"
         let r5f = PromptLinter.lint(mush, target: .chat, unansweredQuestions: 0)
         check("linter: a contentless chat message still fails", !r5f.isClean)

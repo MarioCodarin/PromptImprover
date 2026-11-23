@@ -71,23 +71,30 @@ The meta-prompts in `MetaPrompts.swift` are built from current published guidanc
 - OpenAI, *GPT-5 prompting guide* (contradictory instructions cost reasoning tokens; metaprompting with minimal edits) — [developers.openai.com/cookbook/examples/gpt-5/gpt-5_prompting_guide](https://developers.openai.com/cookbook/examples/gpt-5/gpt-5_prompting_guide)
 - Google, *Prompt design strategies* — [ai.google.dev/gemini-api/docs/prompting-strategies](https://ai.google.dev/gemini-api/docs/prompting-strategies)
 
-What the writer is actually told, and why:
+What the writer is actually told, and why. The principles are cut one-to-one onto the twelve rubric axes, so the instruction and the score are the same object:
 
-| Principle | Source of the rule |
-|---|---|
-| State the outcome and why it matters, not just the activity | models generalise from a purpose better than from a rule list |
-| Right altitude: specific enough to steer, general enough to cover unlisted cases | Anthropic, context engineering |
-| Every line earns its place; inferable context is noise that costs attention | Anthropic, context engineering |
-| **Contradictions are the worst defect** — check every rule pair before shipping, resolve conflicts with an explicit priority | GPT-5 guide: contradictory prompts burn reasoning on reconciliation |
-| Say what to do, not only what to avoid; prohibitions need a replacement behaviour | Anthropic, best practices |
-| Success criteria must be checkable by someone who did not do the work | rubric axis `criteria`, anchors 4/2/0 |
-| Verification is part of the task; show the evidence | Anthropic, agentic systems |
-| Autonomy is a decision: act by default, name the action classes that need confirmation | Anthropic, *Balancing autonomy and safety* |
-| Never invent names, numbers, URLs or dates; record a default as an assumption or a `{{PLACEHOLDER}}` | Gemini, structured output; this app's Assumptions section |
-| No theatre: no world-class personas, no ALL-CAPS, no threats or bribes | measured to hurt on current models |
-| Don't tell a reasoning model to think step by step; tell it what to reason about | GPT-5 guide |
-| Research tasks: prefer primary sources, a source and retrieval date per claim, separate confirmed from inferred | Anthropic, *Research and information gathering* |
-| Long material goes before the instructions that use it, wrapped in tags | Anthropic, *Long context prompting* |
+| Axis | The rule | Source |
+|---|---|---|
+| Goal | State the outcome and why it matters, not just the activity | models generalise from a purpose better than from a rule list |
+| Context | Only what the model cannot infer; long material in tags, before the instructions | Anthropic, *Long context prompting* |
+| Inputs | Name what exists and what is missing; never assume a file or a repository | Gemini, *Prompt design strategies* |
+| Deliverable | Fix format, structure, length as a number, language, and one exclusion | rubric axis `deliverable` |
+| Criteria | Checkable by someone who did not do the work; each names a method the executor has | rubric axis `criteria` |
+| Constraints | Say what is out of scope; prohibitions need a replacement behaviour | Anthropic, best practices |
+| Procedure | Order the work, and give each phase a stopping condition | Anthropic, *Effective context engineering* |
+| Autonomy | Act by default; name the action classes needing confirmation, each with a reason | Anthropic, *Balancing autonomy and safety* |
+| Verification | Say how to prove each criterion and what evidence to show | Anthropic, agentic systems |
+| Consistency | **Contradictions are the worst defect** — check every rule pair, resolve with an explicit priority | GPT-5 guide: contradictory prompts burn reasoning on reconciliation |
+| Economy | Every line earns its place; no personas, no ALL-CAPS, no threats, no restating the request | measured to hurt on current models |
+| Robustness | Name the failure policy: missing input, ambiguity, partial success, out of scope | GPT-5 guide; Anthropic, context engineering |
+
+Three rules sit outside the axes because they apply to every prompt:
+
+- **Separate facts from design decisions.** Never assert a fact you were not given — prices, names, URLs, dates, counts, citations. Limits you impose on the work (word counts, timeouts, line budgets) are yours to choose: state the number and record it under Assumptions. This distinction is the one the tool exists to enforce, and the first version of the rule failed because it forbade both.
+- **Research when the task needs facts you cannot know.** Prefer primary sources, a source and a retrieval date per claim, confirmed separated from inferred.
+- **One canonical example beats ten edge cases**, and only when a format is hard to describe in words.
+
+Each target gets its own worked example, in its own shape. One exemplar served all three before, and its shape was the agent-task skeleton — so a system prompt and a chat message were shown sections they are told to drop.
 
 Two structural choices matter more than any single rule:
 
@@ -110,7 +117,7 @@ Sources/PromptImprover/
 ├── LLMClient.swift           Both wire formats, SSE streaming, retry with backoff, parameter fallback, truncation detection
 ├── Endpoints.swift           Endpoint model, presets, EndpointStore, Keychain wrapper
 ├── Profile.swift             UserProfile, feedback tags, learned preferences
-├── SelfTest.swift            59 offline checks + --lint / --dump-prompts
+├── SelfTest.swift            70 offline checks + --lint / --dump-prompts
 ├── E2E.swift                 Headless pipeline run with a stage trace (--e2e)
 ├── LoginItem.swift           SMAppService open-at-login
 └── Logo.swift                LogoMark (SwiftUI) + .icns renderer
