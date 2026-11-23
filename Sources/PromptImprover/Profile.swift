@@ -1,4 +1,5 @@
 import Foundation
+import PromptCore
 
 struct UserProfile: Codable, Equatable {
     enum Expertise: String, Codable, CaseIterable, Identifiable { case beginner = "Beginner", intermediate = "Intermediate", expert = "Expert"; var id: String { rawValue } }

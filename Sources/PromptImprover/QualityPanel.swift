@@ -1,4 +1,5 @@
 import SwiftUI
+import PromptCore
 
 /// Small score chip shown under the result: rubric score, structural score, test count.
 struct QualityBadge: View {

@@ -10,21 +10,21 @@ import Foundation
 /// ("auto-assign before informing" vs "inform before assigning") are left to the critic, because
 /// a word-overlap heuristic would flag "always run the tests" against "never commit without
 /// running tests" and call agreement a conflict.
-enum PromptLinter {
+public enum PromptLinter {
 
-    struct Issue: Identifiable, Hashable {
-        enum Severity: String, Comparable {
+    public struct Issue: Identifiable, Hashable {
+        public enum Severity: String, Comparable {
             case blocker, major, minor
             private var rank: Int {
                 switch self { case .blocker: return 0; case .major: return 1; case .minor: return 2 }
             }
-            static func < (a: Severity, b: Severity) -> Bool { a.rank < b.rank }
+            public static func < (a: Severity, b: Severity) -> Bool { a.rank < b.rank }
         }
-        var id: String
-        var severity: Severity
-        var title: String
-        var detail: String
-        var fix: String
+        public var id: String
+        public var severity: Severity
+        public var title: String
+        public var detail: String
+        public var fix: String
 
         /// Which rubric axis this check defends, so a lint-driven repair is told what the issue
         /// is about instead of guessing.
@@ -36,7 +36,7 @@ enum PromptLinter {
         /// section blocker report `consistency`, the axis that means "contradiction", so a repair
         /// was sent looking for a contradiction when the prompt was simply missing a heading.
         /// A self-test asserts every emitted id resolves to its own axis.
-        var axis: String {
+        public var axis: String {
             // Section checks emit `missing-<section>`.
             if id.hasPrefix("missing-") {
                 switch id.dropFirst("missing-".count) {
@@ -70,7 +70,7 @@ enum PromptLinter {
 
         /// The same issue in the shape the repair stage already consumes. The linter has no
         /// quote, so the title and detail carry the problem instead.
-        var asCritiqueIssue: CritiqueIssue {
+        public var asCritiqueIssue: CritiqueIssue {
             let mapped: Defect.Severity
             switch severity {
             case .blocker: mapped = .blocker
@@ -82,18 +82,18 @@ enum PromptLinter {
         }
     }
 
-    struct Report {
-        var issues: [Issue] = []
-        var passed: [String] = []
-        var checksRun = 0
+    public struct Report {
+        public var issues: [Issue] = []
+        public var passed: [String] = []
+        public var checksRun = 0
 
-        var blockers: [Issue] { issues.filter { $0.severity == .blocker } }
-        var majors: [Issue] { issues.filter { $0.severity == .major } }
-        var minors: [Issue] { issues.filter { $0.severity == .minor } }
-        var isClean: Bool { blockers.isEmpty && majors.isEmpty }
+        public var blockers: [Issue] { issues.filter { $0.severity == .blocker } }
+        public var majors: [Issue] { issues.filter { $0.severity == .major } }
+        public var minors: [Issue] { issues.filter { $0.severity == .minor } }
+        public var isClean: Bool { blockers.isEmpty && majors.isEmpty }
 
         /// 100 minus weighted penalties. A blocker is not a style note: it drops the score hard.
-        var score: Int {
+        public var score: Int {
             var s = 100
             for i in issues {
                 switch i.severity {
@@ -105,7 +105,7 @@ enum PromptLinter {
             return max(0, s)
         }
 
-        var summary: String {
+        public var summary: String {
             if issues.isEmpty { return "All \(checksRun) structural checks passed." }
             let b = blockers.count, m = majors.count, n = minors.count
             var parts: [String] = []
@@ -118,7 +118,7 @@ enum PromptLinter {
 
     // MARK: - Entry point
 
-    static func lint(_ prompt: String, target: PromptTarget, unansweredQuestions: Int, draft: String = "") -> Report {
+    public static func lint(_ prompt: String, target: PromptTarget, unansweredQuestions: Int, draft: String = "") -> Report {
         var r = Report()
         let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {

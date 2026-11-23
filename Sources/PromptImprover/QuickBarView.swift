@@ -1,4 +1,5 @@
 import SwiftUI
+import PromptCore
 
 // MARK: - Root: cards stacked on top of the bar
 

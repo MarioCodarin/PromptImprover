@@ -5,9 +5,9 @@ import Foundation
 ///
 /// Run with `PromptImprover --selftest`. Exit code 0 means the app's own gate still passes its own
 /// examples — the one thing that must never silently rot when a prompt is edited.
-enum SelfTest {
+public enum SelfTest {
 
-    static func run() -> Int32 {
+    public static func run() -> Int32 {
         var failures: [(String, String)] = []
         var passes = 0
 
@@ -1201,7 +1201,7 @@ enum SelfTest {
 
     // MARK: - CLI helpers
 
-    static func lintFile(_ path: String, target: PromptTarget = .agentTask, unanswered: Int = 0) -> Int32 {
+    public static func lintFile(_ path: String, target: PromptTarget = .agentTask, unanswered: Int = 0) -> Int32 {
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
             FileHandle.standardError.write(Data("cannot read \(path)\n".utf8))
             return 2
@@ -1225,7 +1225,7 @@ enum SelfTest {
     /// after a prompt edit and read the result as a code change. It printed only a name and a
     /// token count, so there was nothing to diff, and it covered six of the twelve builders, so
     /// half the prompts could change without appearing at all.
-    static func dumpPrompts() {
+    public static func dumpPrompts() {
         var items: [(String, String)] = []
         for target in PromptTarget.allCases {
             let slug = target.rawValue.lowercased().replacingOccurrences(of: " ", with: "-")

@@ -6,9 +6,9 @@ import Foundation
 /// `PromptEngine` the UI drives, prints a stage trace with per-stage timing, and applies the same
 /// linter gate. Point it at a real endpoint, or at the mock server in `Tests/mock_llm.py` to verify
 /// the plumbing without spending tokens.
-enum E2E {
+public enum E2E {
 
-    struct Config {
+    public struct Config {
         var baseURL = ""
         var key = ""
         var model = ""
@@ -31,7 +31,7 @@ enum E2E {
         var answerQuestions = false
     }
 
-    static func parse(_ args: [String]) -> Config? {
+    public static func parse(_ args: [String]) -> Config? {
         var c = Config()
         var i = 0
         func next() -> String? { i + 1 < args.count ? args[i + 1] : nil }
@@ -113,7 +113,7 @@ enum E2E {
         return c
     }
 
-    static func run(_ c: Config) async -> Int32 {
+    public static func run(_ c: Config) async -> Int32 {
         let endpoint = Endpoint(name: "e2e", baseURL: c.baseURL, format: c.format,
                                 models: [c.model], selectedModel: c.model,
                                 reasoningEffort: c.effort)

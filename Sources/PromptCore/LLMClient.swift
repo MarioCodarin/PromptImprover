@@ -1,21 +1,21 @@
 import Foundation
 
-struct ChatMessage {
-    enum Role: String { case user, assistant }
-    var role: Role
-    var content: String
-    static func user(_ s: String) -> ChatMessage { .init(role: .user, content: s) }
-    static func assistant(_ s: String) -> ChatMessage { .init(role: .assistant, content: s) }
+public struct ChatMessage {
+    public enum Role: String { case user, assistant }
+    public var role: Role
+    public var content: String
+    public static func user(_ s: String) -> ChatMessage { .init(role: .user, content: s) }
+    public static func assistant(_ s: String) -> ChatMessage { .init(role: .assistant, content: s) }
 }
 
-enum LLMError: LocalizedError {
+public enum LLMError: LocalizedError {
     case badURL(String)
     case http(Int, String)
     case api(String)
     case missingKey
     case truncated
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .badURL(let u): return "Invalid base URL: \(u)"
         case .http(let code, let body): return "HTTP \(code): \(body.prefix(400))"
@@ -26,7 +26,7 @@ enum LLMError: LocalizedError {
     }
 
     /// Worth another attempt: rate limits, gateway hiccups, overload. A 400 or 401 never is.
-    var isTransient: Bool {
+    public var isTransient: Bool {
         if case .http(let code, _) = self {
             return [408, 409, 429, 500, 502, 503, 504, 529].contains(code)
         }
@@ -49,15 +49,15 @@ enum LLMError: LocalizedError {
 ///
 /// Cost is the second half of "is this configuration sane": a Deep run is five or six calls, and
 /// without this the only way to know what it cost is the provider's dashboard tomorrow.
-final class UsageTracker {
+public final class UsageTracker {
     private let lock = NSLock()
     private var _input = 0, _output = 0, _cached = 0, _cacheWrites = 0
 
-    var inputTokens: Int { lock.withLock { _input } }
-    var outputTokens: Int { lock.withLock { _output } }
-    var cachedTokens: Int { lock.withLock { _cached } }
+    public var inputTokens: Int { lock.withLock { _input } }
+    public var outputTokens: Int { lock.withLock { _output } }
+    public var cachedTokens: Int { lock.withLock { _cached } }
     /// Anthropic cache writes, billed above the input rate. Zero on the chat-completions format.
-    var cacheWriteTokens: Int { lock.withLock { _cacheWrites } }
+    public var cacheWriteTokens: Int { lock.withLock { _cacheWrites } }
 
     private var lastInput = 0
     private var lastOutput = 0
@@ -66,7 +66,7 @@ final class UsageTracker {
 
     /// Called once per request. Anthropic reports cumulative totals per message, so the deltas
     /// have to be measured against the start of *that* message, not the whole run.
-    func beginCall() {
+    public func beginCall() {
         lock.withLock {
             lastInput = 0
             lastOutput = 0
@@ -75,7 +75,7 @@ final class UsageTracker {
         }
     }
 
-    func observe(input: Int, output: Int, cached: Int, writes: Int = 0) {
+    public func observe(input: Int, output: Int, cached: Int, writes: Int = 0) {
         guard input > 0 || output > 0 else { return }
         lock.withLock {
             _input += max(0, input - lastInput)
@@ -95,7 +95,7 @@ final class UsageTracker {
     ///
     /// Cached input bills at a fraction of the fresh rate, so it is priced separately rather than
     /// ignored: a run that reuses a 2k-token prompt looked free when it was merely cheap.
-    func cost(inputPerM: Double?, outputPerM: Double?, cachedPerM: Double? = nil,
+    public func cost(inputPerM: Double?, outputPerM: Double?, cachedPerM: Double? = nil,
               readRatio: Double = 0.5) -> Double? {
         guard let i = inputPerM, let o = outputPerM else { return nil }
         // The default discount is the wire format's, not one provider's: Anthropic bills cache
@@ -114,50 +114,55 @@ final class UsageTracker {
                 + Double(outputTokens) * o) / 1_000_000
     }
 
-    var summary: String {
+    public var summary: String {
         let cached = cachedTokens > 0 ? " (\(cachedTokens) cached)" : ""
         return "\(inputTokens) in\(cached) / \(outputTokens) out"
     }
 }
 
-struct LLMClient {
-    let endpoint: Endpoint
-    let apiKey: String
+public struct LLMClient {
+    public let endpoint: Endpoint
+    public let apiKey: String
     /// Shared across the whole pipeline, so one run reports one total.
-    let usage = UsageTracker()
+    public let usage = UsageTracker()
+
+    public init(endpoint: Endpoint, apiKey: String) {
+        self.endpoint = endpoint
+        self.apiKey = apiKey
+    }
 
     /// Makes every subsequent request fail at the transport. Used by the `--vm` probe to test the
     /// error paths of the state machine without waiting for a real outage.
-    final class Poison: @unchecked Sendable {
+    public final class Poison: @unchecked Sendable {
         private let lock = NSLock()
         private var dead = false
-        var isDead: Bool { lock.lock(); defer { lock.unlock() }; return dead }
-        func kill() { lock.lock(); dead = true; lock.unlock() }
+        public var isDead: Bool { lock.lock(); defer { lock.unlock() }; return dead }
+        public func kill() { lock.lock(); dead = true; lock.unlock() }
     }
-    let poison = Poison()
+    public let poison = Poison()
 
     /// Parameters this endpoint has already rejected. Shared across the whole pipeline, so a
     /// locked-down gateway costs one 400 per parameter per run instead of one per stage.
-    final class Rejected: @unchecked Sendable {
+    public final class Rejected: @unchecked Sendable {
         private let lock = NSLock()
         private var names: Set<String> = []
-        func contains(_ name: String) -> Bool { lock.lock(); defer { lock.unlock() }; return names.contains(name) }
-        func add(_ name: String) { lock.lock(); names.insert(name); lock.unlock() }
+        public func contains(_ name: String) -> Bool { lock.lock(); defer { lock.unlock() }; return names.contains(name) }
+        public func add(_ name: String) { lock.lock(); names.insert(name); lock.unlock() }
     }
-    let rejected = Rejected()
+    public let rejected = Rejected()
 
     /// Tuning for one call. Nil means "let the server decide".
-    struct Options {
-        var temperature: Double?
-        var maxTokens: Int?
-        var jsonMode = false
+    public struct Options {
+        public var temperature: Double?
+        public var maxTokens: Int?
+        public var jsonMode = false
         /// Sending `stream_options` is the only way [OI] gateways report usage on a stream, but not
         /// every gateway accepts it. Cleared by the 400 fallback like any other optional parameter.
-        var streamOptions = true
+        public var streamOptions = true
         /// Mirrors the endpoint's configured effort; cleared if the gateway rejects the parameter.
-        var reasoningEffort: String?
-        static let `default` = Options()
-        static func json(temperature: Double = 0) -> Options { .init(temperature: temperature, jsonMode: true) }
+        public var reasoningEffort: String?
+        public static let `default` = Options()
+        public static func json(temperature: Double = 0) -> Options { .init(temperature: temperature, jsonMode: true) }
     }
 
     private func request(_ path: String) throws -> URLRequest {
@@ -189,7 +194,7 @@ struct LLMClient {
 
     // MARK: Models
 
-    func listModels() async throws -> [String] {
+    public func listModels() async throws -> [String] {
         let (data, resp) = try await URLSession.shared.data(
             for: try request(endpoint.format == .anthropic ? "models?limit=1000" : "models"))
         if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
@@ -201,7 +206,7 @@ struct LLMClient {
 
     // MARK: Chat (streaming)
 
-    func stream(system: String,
+    public func stream(system: String,
                 messages: [ChatMessage],
                 model: String,
                 options: Options = .default) -> AsyncThrowingStream<String, Error> {
@@ -221,7 +226,7 @@ struct LLMClient {
         }
     }
 
-    func complete(system: String,
+    public func complete(system: String,
                   messages: [ChatMessage],
                   model: String,
                   options: Options = .default) async throws -> String {
@@ -431,7 +436,7 @@ struct LLMClient {
     /// Anthropic reports `input_tokens` exclusive of cache reads and cache writes, while the
     /// chat-completions format includes both in `prompt_tokens`. Summing the three is what makes
     /// the number mean the same thing on both wire formats.
-    static func anthropicInput(_ u: [String: Any]) -> Int {
+    public static func anthropicInput(_ u: [String: Any]) -> Int {
         func n(_ k: String) -> Int { (u[k] as? NSNumber)?.intValue ?? 0 }
         return n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens")
     }
@@ -470,3 +475,4 @@ struct LLMClient {
         }
     }
 }
+

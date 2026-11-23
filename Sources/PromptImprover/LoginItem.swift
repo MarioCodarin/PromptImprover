@@ -1,4 +1,5 @@
 import Foundation
+import PromptCore
 import ServiceManagement
 
 /// "Open at login" via SMAppService (macOS 13+). No helper app or LaunchAgent plist needed.

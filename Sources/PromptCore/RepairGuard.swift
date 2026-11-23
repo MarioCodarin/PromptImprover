@@ -22,26 +22,26 @@ import Foundation
 /// only sent when the critic found something unusable, never for polish. That rule lives here too
 /// so the app and the harness cannot disagree about it — they had drifted when it lived in two
 /// places, and the drift was invisible until a run produced a different prompt from the same input.
-enum RepairGuard {
+public enum RepairGuard {
 
-    enum Reason: String, Equatable {
+    public enum Reason: String, Equatable {
         case empty = "the repair returned nothing"
         case gainedBlocker = "it introduced a blocker"
         case brokeClean = "the prompt was clean before the repair"
         case gainedMajor = "it left more major defects than it fixed"
     }
 
-    enum Verdict: Equatable {
+    public enum Verdict: Equatable {
         case accept
         case revert(Reason)
 
-        var isRevert: Bool {
+        public var isRevert: Bool {
             if case .revert = self { return true }
             return false
         }
 
         /// One line for the panel, or nil when the repair was accepted.
-        var note: String? {
+        public var note: String? {
             if case .revert(let reason) = self { return reason.rawValue }
             return nil
         }
@@ -50,7 +50,7 @@ enum RepairGuard {
     /// A stable name for the defect an entry is about, so the critic's list and the gate's can be
     /// compared. The gate names its finding in `problem` ("Missing output contract section: …") and
     /// the critic quotes the text, so an id-based comparison never matched anything.
-    static func defectKey(_ issue: CritiqueIssue) -> String {
+    public static func defectKey(_ issue: CritiqueIssue) -> String {
         // Normalise the separators first: the gate writes "Missing output contract section: …"
         // and an id-shaped spelling is "missing-output contract". Both name the same defect.
         let text = issue.problem.lowercased().replacingOccurrences(of: "-", with: " ")
@@ -71,7 +71,7 @@ enum RepairGuard {
     /// linter rejects must not ship because the critic said "ship". Minors are excluded from the
     /// gate's contribution: they are polish, and churning on them costs a call for no change in
     /// whether the prompt is usable.
-    static func issues(critique: Critique, lint: PromptLinter.Report?) -> [CritiqueIssue] {
+    public static func issues(critique: Critique, lint: PromptLinter.Report?) -> [CritiqueIssue] {
         var out = critique.needsRepair ? critique.issues : []
         // A prompt the gate already passes is worth a call only when the critic found something
         // that makes it unusable. Repairing polish has nothing to aim at, so the model rewrites for
@@ -99,7 +99,7 @@ enum RepairGuard {
     }
 
     /// Severity-weighted defect load. Used for the panel's explanation, not for the verdict.
-    static func load(_ r: PromptLinter.Report) -> Int {
+    public static func load(_ r: PromptLinter.Report) -> Int {
         r.blockers.count * 100 + r.majors.count * 10 + r.minors.count
     }
 
@@ -107,7 +107,7 @@ enum RepairGuard {
     ///   - before: the report for the text that was sent for repair.
     ///   - after: the report for the text the repair returned.
     ///   - revised: the repaired text, so emptiness is decided here rather than by every caller.
-    static func judge(before: PromptLinter.Report, after: PromptLinter.Report, revised: String) -> Verdict {
+    public static func judge(before: PromptLinter.Report, after: PromptLinter.Report, revised: String) -> Verdict {
         if revised.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return .revert(.empty)
         }

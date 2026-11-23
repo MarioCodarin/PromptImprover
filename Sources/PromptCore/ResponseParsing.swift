@@ -4,17 +4,17 @@ import Foundation
 ///
 /// Kept apart from `MetaPrompts` on purpose: prompt text changes when the doctrine changes,
 /// parsing changes when a model misbehaves, and the two have no reason to be edited together.
-enum ResponseParsing {
+public enum ResponseParsing {
 
     // MARK: - Output hygiene
 
     /// Everything a streamed reply needs before it can be judged: reasoning blocks removed, and a
     /// wrapper fence stripped. Idempotent, so a repair that re-emits clean text is unaffected.
-    static func finalize(_ raw: String) -> String { unfence(stripThinking(raw)) }
+    public static func finalize(_ raw: String) -> String { unfence(stripThinking(raw)) }
 
     /// Removes <think>…</think> blocks some reasoning models emit inline: an unclosed one mid-stream, and an
     /// orphan </think> (chat templates that put the opening tag in the prompt, so only the closing tag comes back).
-    static func stripThinking(_ s: String) -> String {
+    public static func stripThinking(_ s: String) -> String {
         var out = s
         if let close = out.range(of: "</think>"),
            out.range(of: "<think>", range: out.startIndex..<close.lowerBound) == nil {
@@ -32,7 +32,7 @@ enum ResponseParsing {
 
     /// Removes one code fence wrapping the *whole* output. Only when the first and last lines are the only
     /// fence lines, so output that starts and ends with separate code blocks is left alone.
-    static func unfence(_ s: String) -> String {
+    public static func unfence(_ s: String) -> String {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         let lines = t.components(separatedBy: "\n")
         let fences = lines.indices.filter { lines[$0].trimmingCharacters(in: .whitespaces).hasPrefix("```") }
@@ -63,7 +63,7 @@ enum ResponseParsing {
     /// Returning the first parseable object is the bug. Skipping spans that "look empty" is the
     /// wrong fix, because a legitimate `{"verdict": "ship", "issues": []}` is empty-looking too.
     /// So every span is parsed and the caller's rank decides which one is the answer.
-    static func jsonObject(from raw: String,
+    public static func jsonObject(from raw: String,
                            rank: (([String: Any]) -> Int)? = nil) -> [String: Any]? {
         let text = unfence(stripThinking(raw))
         var best: ([String: Any], Int)?
@@ -168,7 +168,7 @@ enum ResponseParsing {
         return out
     }
 
-    static func parseDiagnosis(_ raw: String) -> Diagnosis {
+    public static func parseDiagnosis(_ raw: String) -> Diagnosis {
         var d = Diagnosis()
         // An example of the schema is not a diagnosis. `{"brief": "", "findings": [], "questions":
         // []}` scores 0 here and loses to the real answer that follows it; if no span carries any
@@ -226,7 +226,7 @@ enum ResponseParsing {
         return d
     }
 
-    static func parseCritique(_ raw: String) -> Critique? {
+    public static func parseCritique(_ raw: String) -> Critique? {
         // A schema example (`{"verdict": "ship", "issues": []}`) is legal JSON and used to be
         // returned as the verdict, so a prompt the critic never scored was read as passing. The
         // real critique carries issues, scores or a summary and outranks it.
@@ -258,7 +258,7 @@ enum ResponseParsing {
         return c
     }
 
-    static func parseEvalSuite(_ raw: String) -> EvalSuite? {
+    public static func parseEvalSuite(_ raw: String) -> EvalSuite? {
         guard let obj = jsonObject(from: raw) else { return nil }
         var suite = EvalSuite()
         suite.judgeRubric = (obj["judge_rubric"] as? String) ?? ""

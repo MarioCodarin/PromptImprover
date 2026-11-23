@@ -1,4 +1,5 @@
 import Foundation
+import PromptCore
 import AppKit
 
 /// Drives the five-stage pipeline: diagnose → write → lint → verify → repair (+ tests).
@@ -194,7 +195,7 @@ final class ImproverViewModel: ObservableObject {
         output = ""
         rated = nil
 
-        let brief = MetaPrompts.composeBrief(draft: draft, diagnosis: diagnosis ?? Diagnosis(), questions: questions)
+        let brief = MetaPrompts.composeBrief(draft: draft, diagnosis: diagnosis ?? .empty, questions: questions)
         history = [.user(brief)]
 
         task = Task {
@@ -248,7 +249,7 @@ final class ImproverViewModel: ObservableObject {
                 // stray brace in the critic's prose switched off repair for the whole run. An
                 // empty critique says nothing, which leaves the linter's blockers and majors as
                 // the only issues — exactly the case the gate exists for.
-                let parsed = c ?? Critique()
+                let parsed = c ?? .empty
                 critique = c
                 // Repair is driven by what the critic found *and* what the gate found. They measure
                 // different things, and only the gate is deterministic: a prompt the linter rejects

@@ -1,4 +1,5 @@
 import Foundation
+import PromptCore
 
 /// Headless driver for `ImproverViewModel`, used by `--vm`.
 ///

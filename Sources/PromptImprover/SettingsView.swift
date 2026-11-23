@@ -1,4 +1,5 @@
 import SwiftUI
+import PromptCore
 
 // Plain ObservableObjects instead of @State: the Command Line Tools SDK lacks the SwiftUI macro plugin.
 final class SettingsUI: ObservableObject { @Published var editingID: UUID? }

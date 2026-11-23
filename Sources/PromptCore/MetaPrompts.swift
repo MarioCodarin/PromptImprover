@@ -1,6 +1,6 @@
 import Foundation
 
-enum MetaPrompts {
+public enum MetaPrompts {
 
     /// One principle per rubric axis, keyed by axis so `principleBlock` can hand a target only the
     /// ones it is actually scored on. The previous static block claimed "the critic scores you on
@@ -70,7 +70,7 @@ enum MetaPrompts {
     ]
 
     /// The principles this target is scored on, numbered from one so the list reads as a list.
-    static func principleBlock(for target: PromptTarget) -> String {
+    public static func principleBlock(for target: PromptTarget) -> String {
         let scored = Axis.applicable(to: target)
         let lines = principles
             .filter { scored.contains($0.0) }
@@ -94,7 +94,7 @@ enum MetaPrompts {
     /// at 2 — so the only discrimination it has to make is 2 versus 3. Sending it all three
     /// anchors of every axis (872 words, the largest block in the pipeline) bought a precision
     /// nothing reads. The critic keeps the full anchors, because it produces the number on screen.
-    static func diagnosticRubricBlock(for target: PromptTarget) -> String {
+    public static func diagnosticRubricBlock(for target: PromptTarget) -> String {
         let axes = Axis.applicable(to: target)
         let body = axes.map { axis in
             "- \(axis.rawValue) — \(axis.question)\n  generic (2): \(axis.anchor2)"
@@ -112,7 +112,7 @@ enum MetaPrompts {
         """
     }
 
-    static func rubricBlock(for target: PromptTarget) -> String {
+    public static func rubricBlock(for target: PromptTarget) -> String {
         let axes = Axis.applicable(to: target)
         let body = axes.map { axis in
             """
@@ -131,7 +131,7 @@ enum MetaPrompts {
         """
     }
 
-    static let defectBlock = """
+    public static let defectBlock = """
     <defect_codes>
     Use these codes for findings. Do not invent codes. They are listed worst-first; report
     findings in this order.
@@ -141,7 +141,7 @@ enum MetaPrompts {
 
     // MARK: - Stage 1: diagnose
 
-    static func analyzer(target: PromptTarget) -> String {
+    public static func analyzer(target: PromptTarget) -> String {
         """
         You are the diagnostic stage of a prompt compiler. You receive a rough request that someone \
         intends to hand to an AI model or agent. You work out what is missing before it is written.
@@ -207,7 +207,7 @@ enum MetaPrompts {
         """
     }
 
-    static func analyzerInput(_ draft: String, target: PromptTarget) -> String {
+    public static func analyzerInput(_ draft: String, target: PromptTarget) -> String {
         """
         Intended use: \(target.rawValue)
 
@@ -219,7 +219,7 @@ enum MetaPrompts {
 
     // MARK: - Stage 2: write
 
-    static func writer(target: PromptTarget) -> String {
+    public static func writer(target: PromptTarget) -> String {
         """
         You are a prompt engineer. You compile a rough request into an executable specification: something \
         a capable model or agent can carry out correctly on the first attempt, and that a second person \
@@ -281,7 +281,7 @@ enum MetaPrompts {
     /// Builds the single user message for the writer from the draft, the diagnosis and the Q&A round.
     /// What the risk level should change in the prompt. The analyzer was told the writer used this
     /// to size its escalation detail; the writer was never told what any level meant.
-    static func riskNote(_ risk: String) -> String {
+    public static func riskNote(_ risk: String) -> String {
         switch risk.lowercased() {
         case "high":
             return "spell out every action class that needs confirmation, with the reason and the safer alternative"
@@ -292,7 +292,7 @@ enum MetaPrompts {
         }
     }
 
-    static func composeBrief(draft: String, diagnosis: Diagnosis, questions: [ClarifyingQuestion]) -> String {
+    public static func composeBrief(draft: String, diagnosis: Diagnosis, questions: [ClarifyingQuestion]) -> String {
         var parts = ["<draft>\n\(draft)\n</draft>"]
 
         var diagnosisLines: [String] = []
@@ -364,7 +364,7 @@ enum MetaPrompts {
 
     // MARK: - Stage 3: verify
 
-    static func critic(target: PromptTarget) -> String {
+    public static func critic(target: PromptTarget) -> String {
         """
         You are the verification stage of a prompt compiler. You did not write this prompt and you owe it \
         nothing. Your job is to find the defects that will actually cost the user a bad result.
@@ -415,7 +415,7 @@ enum MetaPrompts {
         """
     }
 
-    static func criticInput(prompt: String, draft: String, target: PromptTarget) -> String {
+    public static func criticInput(prompt: String, draft: String, target: PromptTarget) -> String {
         """
         Intended use: \(target.rawValue)
 
@@ -433,7 +433,7 @@ enum MetaPrompts {
 
     // MARK: - Stage 4: repair
 
-    static let repair = """
+    public static let repair = """
     You are the repair stage of a prompt compiler. You receive a prompt and a verified list of issues. \
     Return the corrected prompt in full.
 
@@ -456,7 +456,7 @@ enum MetaPrompts {
     Output the full corrected prompt only: no diff, no commentary, no fence around the whole thing.
     """
 
-    static func repairInput(prompt: String, issues: [CritiqueIssue], target: PromptTarget,
+    public static func repairInput(prompt: String, issues: [CritiqueIssue], target: PromptTarget,
                             draft: String = "", lengthTarget: String = "") -> String {
         let list = issues.enumerated().map { i, issue in
             """
@@ -501,7 +501,7 @@ enum MetaPrompts {
         }
     }
 
-    static func evalSuite(target: PromptTarget) -> String {
+    public static func evalSuite(target: PromptTarget) -> String {
         """
         You write acceptance tests for a prompt. A test is an input that a weak version of the prompt \
         fails and a good version passes.
@@ -522,7 +522,7 @@ enum MetaPrompts {
         """
     }
 
-    static func evalInput(prompt: String, target: PromptTarget) -> String {
+    public static func evalInput(prompt: String, target: PromptTarget) -> String {
         """
         Intended use: \(target.rawValue)
 
@@ -536,7 +536,7 @@ enum MetaPrompts {
 
     // MARK: - Refine
 
-    static func refineInstruction(_ instruction: String) -> String {
+    public static func refineInstruction(_ instruction: String) -> String {
         """
         Revise the prompt: \(instruction)
 
@@ -549,7 +549,7 @@ enum MetaPrompts {
     // MARK: - Personalisation
 
     /// Appends the user's profile so both stages tailor to the person, not just the draft.
-    static func personalize(_ system: String, profile: String?) -> String {
+    public static func personalize(_ system: String, profile: String?) -> String {
         guard let profile else { return system }
         return system + """
 

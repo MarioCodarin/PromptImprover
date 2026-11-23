@@ -6,18 +6,18 @@ import Foundation
 /// analyzer is directly comparable with a score from the critic, and a repair pass can be judged
 /// against the same bar it was asked to clear. The axis text is injected into the meta-prompts
 /// verbatim, which keeps the prompt and the UI from drifting apart.
-enum Axis: String, CaseIterable, Codable, Identifiable {
+public enum Axis: String, CaseIterable, Codable, Identifiable {
     case goal, context, inputs, deliverable, criteria, constraints
     case procedure, autonomy, verification, consistency, economy, robustness
 
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
     /// Resolve a model-supplied axis name to an axis.
     ///
     /// Models return "output contract" for `deliverable` and "success criteria" for `criteria`.
     /// Before this, an unrecognised key silently scored that axis at the generic 2 with no trace,
     /// so a misnamed axis cost 3-4 points on the 0-100 and nobody could see why.
-    static func match(_ raw: String) -> Axis? {
+    public static func match(_ raw: String) -> Axis? {
         let key = raw.lowercased()
             .replacingOccurrences(of: " ", with: "_")
             .replacingOccurrences(of: "-", with: "_")
@@ -40,7 +40,7 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
         return aliases[key]
     }
 
-    var title: String {
+    public var title: String {
         switch self {
         case .goal: return "Goal & intent"
         case .context: return "Context"
@@ -58,7 +58,7 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
     }
 
     /// The single question the axis asks of a prompt.
-    var question: String {
+    public var question: String {
         switch self {
         case .goal:
             return "Does it state the outcome wanted and why it matters, in terms of the user's problem?"
@@ -88,7 +88,7 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
     }
 
     /// 4 = specific and checkable, 2 = present but generic, 0 = absent. Anchors keep scoring honest.
-    var anchor4: String {
+    public var anchor4: String {
         switch self {
         case .goal:
             return "One or two sentences naming the outcome, who benefits and why it matters. A competent stranger can tell whether the work is on-target."
@@ -117,7 +117,7 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    var anchor2: String {
+    public var anchor2: String {
         switch self {
         case .goal:
             return "An objective is stated but generic, so trade-offs are unguided and two readers would build different things."
@@ -146,7 +146,7 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    var anchor0: String {
+    public var anchor0: String {
         switch self {
         case .goal: return "No objective; only a topic, a verb or a vibe."
         case .context: return "Nothing but the bare request."
@@ -165,7 +165,7 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
 
     /// Weight of the axis in the 0–100 score. Autonomy and verification matter far more for an
     /// agent that touches a filesystem than for a one-shot chat message.
-    func weight(for target: PromptTarget) -> Int {
+    public func weight(for target: PromptTarget) -> Int {
         switch (self, target) {
         case (.autonomy, .chat): return 0
         // A system prompt that runs unattended needs act-vs-ask settled more than a chat message
@@ -196,7 +196,7 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    static func applicable(to target: PromptTarget) -> [Axis] {
+    public static func applicable(to target: PromptTarget) -> [Axis] {
         allCases.filter { $0.weight(for: target) > 0 }
     }
 }
@@ -212,21 +212,21 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
 /// compare two scores — the harness's repair trace, a before/after in a report — goes through
 /// `delta`, which refuses to name a winner inside the spread. A tool that says "73, was 88" leaves
 /// the reader to conclude the prompt got worse; the honest reading is that the critic moved.
-enum RubricNoise {
+public enum RubricNoise {
 
     /// Widest difference observed between two runs on identical text, in rubric points. Any two
     /// scores closer together than this are indistinguishable, so a comparison inside the band is
     /// reported as unchanged rather than as a small win or a small regression.
-    static let measuredSpread = 17
+    public static let measuredSpread = 17
 
-    enum Delta: Equatable {
+    public enum Delta: Equatable {
         case better(Int)
         case worse(Int)
         /// The gap is not larger than the spread. Not a tie — an unanswerable comparison.
         case withinNoise
 
         /// Short clause for a log line or a panel row.
-        var note: String {
+        public var note: String {
             switch self {
             case .withinNoise: return "inside the \(RubricNoise.measuredSpread)-point run-to-run spread"
             case .better(let n): return "up \(n), beyond the spread"
@@ -239,7 +239,7 @@ enum RubricNoise {
     ///
     /// `<=` and not `<`: the measured 17-point gap was observed between two real runs, so a 17-point
     /// difference is exactly the case that must not be called a change.
-    static func delta(from before: Int, to after: Int) -> Delta {
+    public static func delta(from before: Int, to after: Int) -> Delta {
         let change = after - before
         if abs(change) <= measuredSpread { return .withinNoise }
         return change > 0 ? .better(change) : .worse(change)
@@ -248,19 +248,19 @@ enum RubricNoise {
 
 /// A defect is a named failure mode, not an opinion. Codes are stable so the UI, the tests and the
 /// meta-prompts can refer to them without repeating prose.
-struct Defect: Identifiable, Hashable {
-    let code: String
-    let title: String
-    let severity: Severity
+public struct Defect: Identifiable, Hashable {
+    public let code: String
+    public let title: String
+    public let severity: Severity
 
-    enum Severity: String, Codable, CaseIterable { case blocker, major, minor }
+    public enum Severity: String, Codable, CaseIterable { case blocker, major, minor }
 
-    var id: String { code }
+    public var id: String { code }
 
     /// Ordered worst-first: this is also the order the analyzer is told to report in.
     /// Ordered worst-first, and the analyzer is told to report in this order. The list is the
     /// severity order, so anything reading it top-down sees blockers before majors before minors.
-    static let all: [Defect] = [
+    public static let all: [Defect] = [
         // D17, D18, D19 and D20 exist because live runs shipped defects the taxonomy could not
         // name: an invented specific, a criterion nobody could check, padding to reach a length
         // target, and ritual that adds tokens without adding information.
@@ -285,7 +285,7 @@ struct Defect: Identifiable, Hashable {
         .init(code: "D20", title: "Ritual instruction: 'think step by step' and similar, which changes nothing", severity: .minor),
     ]
 
-    static func severity(for code: String) -> Severity {
+    public static func severity(for code: String) -> Severity {
         all.first { $0.code == code }?.severity ?? .minor
     }
 }

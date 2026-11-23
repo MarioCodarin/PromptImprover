@@ -6,28 +6,28 @@ import Foundation
 ///
 /// `wordTokens` is named for what it is (an array) rather than `words`, so a check that wants a
 /// count declares one and no reader has to work out which meaning is in scope.
-struct LintContext {
+public struct LintContext {
     /// The prompt with outer whitespace trimmed.
-    let text: String
+    public let text: String
     /// `text` split on newlines.
-    let lines: [String]
+    public let lines: [String]
     /// The target this prompt is judged against.
-    let target: PromptTarget
+    public let target: PromptTarget
     /// How many of the analyzer's questions the user left blank.
-    let unansweredQuestions: Int
+    public let unansweredQuestions: Int
     /// What the user originally asked for, so "is this a copy" is answerable.
-    let draft: String
+    public let draft: String
 
     /// Artefacts a bound or a format declaration can be scoped to. Shared by `limits` and
     /// `formats` so the two checks cannot disagree about what "the same deliverable" means.
-    static let partTokens: Set<String> = ["summary", "appendix", "section", "introduction",
+    public static let partTokens: Set<String> = ["summary", "appendix", "section", "introduction",
         "conclusion", "abstract", "executive", "chapter", "body", "title", "caption",
         "description", "file", "files", "guide", "readme", "email", "letter", "article",
         "memo", "changelog", "note", "post", "paragraph", "table"]
 
-    var lower: String { text.lowercased() }
-    var wordTokens: [Substring] { text.split(whereSeparator: \.isWhitespace) }
-    var headings: [String] { PromptLinter.headings(lines) }
+    public var lower: String { text.lowercased() }
+    public var wordTokens: [Substring] { text.split(whereSeparator: \.isWhitespace) }
+    public var headings: [String] { PromptLinter.headings(lines) }
 }
 
 /// The fifteen structural checks, one function each.
@@ -39,12 +39,12 @@ struct LintContext {
 ///
 /// The contract each check keeps: **test only what a string test can establish.** A false
 /// positive is worse than a miss, because it teaches the operator to ignore the gate.
-enum LinterChecks {
+public enum LinterChecks {
 
-    typealias Issue = PromptLinter.Issue
+    public typealias Issue = PromptLinter.Issue
 
     /// 1. Not wrapped in a code fence.
-    static func fence(_ c: LintContext) -> Issue? {
+    public static func fence(_ c: LintContext) -> Issue? {
         let lines = c.lines
         guard lines.count >= 3 else { return nil }
         let fenceLines = lines.indices.filter { lines[$0].trimmingCharacters(in: .whitespaces).hasPrefix("```") }
@@ -55,7 +55,7 @@ enum LinterChecks {
     }
 
     /// 2. No chat preamble.
-    static func preamble(_ c: LintContext) -> Issue? {
+    public static func preamble(_ c: LintContext) -> Issue? {
         let lines = c.lines
         let target = c.target
         let first = lines.first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }?
@@ -83,7 +83,7 @@ enum LinterChecks {
     ///
     /// One entry per required section: a missing output contract and missing success
     /// criteria are separate, separately fixable defects.
-    static func sections(_ c: LintContext) -> [(String, Issue?)] {
+    public static func sections(_ c: LintContext) -> [(String, Issue?)] {
         let lines = c.lines
         let lower = c.lower
         let headings = c.headings
@@ -179,7 +179,7 @@ enum LinterChecks {
     }
 
     /// 4. Success criteria must be checkable, not adjectives.
-    static func criteria(_ c: LintContext) -> Issue? {
+    public static func criteria(_ c: LintContext) -> Issue? {
         let lines = c.lines
         let body = PromptLinter.sectionBody(lines, matching: ["success", "acceptance", "done", "criteria", "definition of done", "quality"])
         guard !body.isEmpty else { return nil }   // absence is already a blocker above
@@ -248,7 +248,7 @@ enum LinterChecks {
     }
 
     /// 5. Filler and persona theatre.
-    static func filler(_ c: LintContext) -> Issue? {
+    public static func filler(_ c: LintContext) -> Issue? {
         let lower = c.lower
         // A quoted phrase is the prompt talking *about* language, not using it: a support prompt
         // that forbids "As an AI language model I cannot…" was flagged for saying it.
@@ -285,7 +285,7 @@ enum LinterChecks {
 
     /// Text with quoted spans removed, so a phrase the prompt quotes in order to forbid it is not
     /// read as the prompt saying it. Both straight and typographic quotes.
-    static func strippingQuoted(_ text: String) -> String {
+    public static func strippingQuoted(_ text: String) -> String {
         // Only short spans. A prompt that quotes a phrase in order to forbid it — `Never open with
         // "As an AI language model"` — is not using the phrase, so quoted text is removed before
         // matching. But a regex over any span between two quote marks also deletes everything
@@ -316,7 +316,7 @@ enum LinterChecks {
     }
 
     /// 6. Shouting.
-    static func shouting(_ c: LintContext) -> Issue? {
+    public static func shouting(_ c: LintContext) -> Issue? {
         let lines = c.lines
         let allow: Set<String> = ["API", "JSON", "CSV", "HTML", "CSS", "SQL", "HTTP", "HTTPS", "URL", "URLS",
                                   "CLI", "SDK", "PDF", "XML", "YAML", "TODO", "README", "LLM", "LLMS", "ID",

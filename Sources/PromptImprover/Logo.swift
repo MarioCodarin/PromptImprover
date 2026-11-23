@@ -1,4 +1,5 @@
 import SwiftUI
+import PromptCore
 import AppKit
 
 /// The app mark: a prompt chevron with a cursor, and a spark that "improves" it.

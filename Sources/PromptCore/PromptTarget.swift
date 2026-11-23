@@ -1,13 +1,13 @@
 import Foundation
 
-enum PromptTarget: String, CaseIterable, Identifiable {
+public enum PromptTarget: String, CaseIterable, Identifiable {
     case agentTask = "Agent task"
     case systemPrompt = "System prompt"
     case chat = "Chat message"
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
     /// What the writer must know about the medium it is writing for.
-    var guidance: String {
+    public var guidance: String {
         switch self {
         case .agentTask:
             return """
@@ -41,7 +41,7 @@ enum PromptTarget: String, CaseIterable, Identifiable {
     }
 
     /// The length envelope the structural check enforces, stated to the writer so it can aim.
-    var lengthTarget: String {
+    public var lengthTarget: String {
         switch self {
         case .agentTask: return "under 900 words; a one-step task may be 150. Never pad to reach a floor"
         case .systemPrompt: return "under 800 words; a durable-principles prompt may be 250. Never pad to reach a floor"
@@ -55,7 +55,7 @@ enum PromptTarget: String, CaseIterable, Identifiable {
     /// so a system prompt and a chat message were shown sections they are told to drop, and the
     /// agent one failed the rubric it was modelling (no stopping condition per phase, no action
     /// classes with reasons). Each example below scores 4 on the axes it demonstrates.
-    var exemplar: String {
+    public var exemplar: String {
         switch self {
         case .agentTask:
             return """
@@ -170,7 +170,7 @@ enum PromptTarget: String, CaseIterable, Identifiable {
     }
 
     /// Section skeleton the writer is told to adapt. Empty sections get dropped, not filled.
-    var skeleton: String {
+    public var skeleton: String {
         switch self {
         case .agentTask:
             return """
