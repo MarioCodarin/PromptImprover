@@ -122,7 +122,7 @@ Sources/PromptImprover/
 ├── LLMClient.swift           Both wire formats, SSE streaming, retry with backoff, parameter fallback, truncation detection
 ├── Endpoints.swift           Endpoint model, presets, EndpointStore, Keychain wrapper
 ├── Profile.swift             UserProfile, feedback tags, learned preferences
-├── SelfTest.swift            97 offline checks + --lint / --dump-prompts
+├── SelfTest.swift            100 offline checks + --lint / --dump-prompts
 ├── E2E.swift                 Headless pipeline run with a stage trace (--e2e)
 ├── VMProbe.swift             Headless driver for the view model: restore, cancel, depth (--vm)
 ├── LoginItem.swift           SMAppService open-at-login
@@ -136,7 +136,7 @@ build.sh                      SwiftPM build → self-test → .app bundle (LSUIE
 ## Verifying it
 
 ```sh
-./Tests/run_tests.sh      # 97 offline checks + 14 end-to-end runs against a mock provider
+./Tests/run_tests.sh      # 100 offline checks + 16 end-to-end runs against a mock provider
 ./build.sh                # runs the self-test before bundling; a regression in the prompts fails the build
 ```
 
@@ -164,7 +164,7 @@ python3 Tests/mock_llm.py 8765 &
 .build/debug/PromptImprover --vm  http://127.0.0.1:8765/v1 --key k --model mock --rigor Fast
 ```
 
-The mock is hostile on purpose: it wraps its JSON in prose and fences, answers the first write with a prompt that is missing its success criteria, and reports a blocker so the repair loop runs. Its path prefix selects a failure mode — `/truncate/`, `/retry/`, `/nojson/`, `/anthropic/`, `/strict/` — which is how the truncation, backoff, parameter-fallback, Messages-SSE and locked-down-gateway paths are covered. `/strict/` rejects `stream_options` and `reasoning_effort` the way a proxy with a parameter allowlist does; both must degrade rather than fail the run.
+The mock is hostile on purpose: it wraps its JSON in prose and fences, answers the first write with a prompt that is missing its success criteria, and reports a blocker so the repair loop runs. Its path prefix selects a failure mode — `/truncate/`, `/retry/`, `/nojson/`, `/anthropic/`, `/strict/` — which is how the truncation, backoff, parameter-fallback, Messages-SSE and locked-down-gateway paths are covered. `/strict/` rejects `stream_options` and `reasoning_effort` the way a proxy with a parameter allowlist does; both must degrade rather than fail the run. `/polish/` and `/fabricate/` hold the two halves of the repair trigger apart: the first objects only to minors on a prompt that passes and must cost no call, the second objects to a fabricated figure on the same prompt and must repair.
 
 ### Notes for contributors
 
@@ -174,5 +174,7 @@ The mock is hostile on purpose: it wraps its JSON in prose and fences, answers t
 - The linter only contains checks where a string test is *sound*. Semantic contradictions are left to the critic on purpose — a word-overlap heuristic flags "always run the tests" against "never commit without running tests" and calls agreement a conflict.
 - `Rigor.fast` skips the diagnosis stage entirely. `askQuestions` never skips it: the toggle controls whether the run *stops* for answers, not whether stage 1 happens, because the analyzer's output is the writer's defect list, task type and risk.
 - A repair is judged on **what changed**, not on the weighted score. Only blockers and majors can veto a repair; minors never do, because the critic re-scores the shipped text anyway. `RepairGuard` is the single home for that policy, and both the app and `--e2e` call it — they had drifted apart when the policy lived in two places.
+- **The rubric number is not a regression signal.** Four runs on one target with one draft and one model scored the final text 90, 80, 84 and 73 — a 17-point spread from the critic's own variance. A repair that drops 18 points is one sample from that distribution, which is why the guard judges on the issue list and not on the score. Do not add a score threshold; it will fire on noise.
+- A prompt the gate already passes is only sent to repair when the critic found something *unusable*. Polish has nothing to aim at, so the model rewrites for the sake of rewriting: a live run took a 100/100 prompt and returned 97/100, accepted because minors never veto. A critic blocker or major still repairs a clean prompt — that is the fabrication the linter cannot see, and skipping it would ship the one failure this tool exists to prevent. Two mock modes pin the pair in opposite directions: `/polish/` must spend no call, `/fabricate/` must repair.
 - The linter's issue→axis table is keyed on the ids the checks actually emit. It has been wrong twice (once on a registry label, once on single-word section names while the sections are `"output contract"` and `"success criteria"`), and both times every section blocker reported `consistency`, so a repair was sent looking for a contradiction. A self-test builds the id list from `requiredSections` so renaming a section cannot unmoor its axis.
 - When you change a prompt, run `--dump-prompts` before and after and read the diff. Prompt edits are code changes; they get reviewed like code changes.

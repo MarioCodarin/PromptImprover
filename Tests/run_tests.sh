@@ -70,6 +70,17 @@ expect "anthropic usage counts cached input too" 0 "tokens 10000 in (2000 cached
 expect "chat-completions usage counts input tokens" 0 "tokens 10500 in" \
   -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor Standard
 
+# The two halves of the repair trigger, which have to stay in opposite directions.
+# Polish only: the gate passes, the critic objects to minors, and no call is spent. Before this
+# rule a live run took a 100/100 prompt to 97/100, accepted because minors never veto.
+expect "polish does not spend a repair call on a clean prompt" 0 "calls 3" \
+  -- "$BIN" --e2e "$BASE/polish/v1" --key k --model mock --rigor Standard
+
+# A fabrication the linter cannot see still repairs, even though the gate is clean. Skipping this
+# would ship the one failure the tool exists to prevent.
+expect "a fabrication the linter cannot see still repairs" 0 "repair accepted" \
+  -- "$BIN" --e2e "$BASE/fabricate/v1" --key k --model mock --rigor Standard
+
 expect "a truncated reply fails loudly instead of shipping half a prompt" 2 "cut off" \
   -- "$BIN" --e2e "$BASE/truncate/v1" --key k --model mock --rigor Standard
 

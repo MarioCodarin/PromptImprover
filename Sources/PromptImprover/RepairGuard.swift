@@ -10,6 +10,18 @@ import Foundation
 /// The guard asks what actually changed instead. Only blockers and majors can veto, because those
 /// are the severities that make a prompt unusable; minors are polish, and the critic re-scores the
 /// shipped text anyway. A pure function over two reports, so the rule is testable without a model.
+///
+/// Do not add a threshold on the weighted score. It was measured: four runs on one target with one
+/// draft and one model scored the final text 90, 80, 84 and 73 — a 17-point spread on the same
+/// instrument, from the critic's own run-to-run variance. A repair that drops 18 points is one
+/// sample from that distribution, so a score threshold would fire on noise and discard good
+/// repairs. The issue list is the signal; the score is a noisy aggregate of twelve noisy
+/// sub-judgements.
+///
+/// It also decides whether a repair is worth calling at all: a prompt the gate already passes is
+/// only sent when the critic found something unusable, never for polish. That rule lives here too
+/// so the app and the harness cannot disagree about it — they had drifted when it lived in two
+/// places, and the drift was invisible until a run produced a different prompt from the same input.
 enum RepairGuard {
 
     enum Reason: String, Equatable {
@@ -61,6 +73,14 @@ enum RepairGuard {
     /// whether the prompt is usable.
     static func issues(critique: Critique, lint: PromptLinter.Report?) -> [CritiqueIssue] {
         var out = critique.needsRepair ? critique.issues : []
+        // A prompt the gate already passes is worth a call only when the critic found something
+        // that makes it unusable. Repairing polish has nothing to aim at, so the model rewrites for
+        // the sake of rewriting: a live run took a 100/100 prompt and returned 97/100, accepted
+        // because minors never veto. A blocker or major still gets through, because that is the
+        // fabrication the linter cannot see — the one thing this stage exists to catch.
+        if lint?.isClean ?? false {
+            out = out.filter { $0.severity != .minor }
+        }
         guard let lint, !lint.isClean else { return out }
         // Keyed on the defect the entry names, not on `CritiqueIssue.id`: the gate has no quote
         // and the critic's problem text never matches the gate's title, so an id-based set removed

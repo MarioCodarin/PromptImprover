@@ -374,6 +374,34 @@ enum SelfTest {
         check("repair guard: a clean gate and a shipping critic trigger nothing",
               RepairGuard.issues(critique: ship, lint: clean).isEmpty)
 
+        // A clean prompt must not be sent to repair over polish. There is nothing to aim at, so the
+        // model rewrites for the sake of rewriting: a live run took 100/100 and returned 97/100,
+        // accepted because minors never veto.
+        var polish = Critique()
+        polish.verdict = "repair"
+        polish.issues = [CritiqueIssue(axis: "economy", severity: .minor, quote: "a line",
+                                       problem: "slightly wordy", fix: "cut it")]
+        check("repair guard: polish does not send a clean prompt to repair",
+              RepairGuard.issues(critique: polish, lint: clean).isEmpty)
+
+        // But a clean prompt the critic finds unusable still goes: that is the fabrication the
+        // linter cannot see, and skipping it would ship the one failure this tool exists to catch.
+        var fabricates = Critique()
+        fabricates.verdict = "repair"
+        fabricates.issues = [CritiqueIssue(axis: "context", severity: .blocker, quote: "12% of users",
+                                           problem: "invented statistic", fix: "mark it a placeholder")]
+        check("repair guard: a critic blocker still repairs a clean prompt",
+              RepairGuard.issues(critique: fabricates, lint: clean).count == 1)
+
+        // On a prompt the gate already rejects, critic minors are kept: the call is happening
+        // anyway, so they cost nothing and the model may as well fix them.
+        var minorsOnDirty = Critique()
+        minorsOnDirty.verdict = "repair"
+        minorsOnDirty.issues = [CritiqueIssue(axis: "economy", severity: .minor, quote: "a line",
+                                              problem: "slightly wordy", fix: "cut it")]
+        check("repair guard: critic minors survive on a prompt the gate already rejects",
+              RepairGuard.issues(critique: minorsOnDirty, lint: majorAfter).count == 2)
+
         // The critic and the gate both name the same missing section. The repair prompt must show
         // it once. An id-based dedup never matched, because the gate has no quote.
         var both = Critique()

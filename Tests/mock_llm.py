@@ -154,6 +154,58 @@ CRITIQUE_REPAIR = {
     },
 }
 
+CRITIQUE_POLISH = {
+    "verdict": "repair",
+    "summary": "Executable as written; two lines could be tighter.",
+    "issues": [
+        {"axis": "economy", "severity": "minor", "quote": "Everything on the page either moves a visitor",
+         "problem": "The sentence runs long.", "fix": "Split it in two."},
+        {"axis": "economy", "severity": "minor", "quote": "The page has one job",
+         "problem": "Filler clause.", "fix": "Delete it."},
+    ],
+    "strengths": ["Criteria are checkable", "Exclusions prevent invention"],
+    "scores": {
+        "goal": {"note": "Outcome stated.", "score": 4},
+        "context": {"note": "Only non-inferable facts.", "score": 4},
+        "inputs": {"note": "Named.", "score": 3},
+        "deliverable": {"note": "Format, length, language, exclusion.", "score": 4},
+        "criteria": {"note": "Observable checks.", "score": 4},
+        "constraints": {"note": "In and out of scope.", "score": 3},
+        "procedure": {"note": "Ordered.", "score": 3},
+        "autonomy": {"note": "Escalation trigger named.", "score": 3},
+        "verification": {"note": "Check-then-report.", "score": 4},
+        "consistency": {"note": "No conflicting pair.", "score": 4},
+        "economy": {"note": "Two long lines.", "score": 3},
+        "robustness": {"note": "Placeholder policy stated.", "score": 3},
+    },
+}
+
+CRITIQUE_FABRICATE = {
+    "verdict": "repair",
+    "summary": "Structurally sound, but it asserts a statistic the request never supplied.",
+    "issues": [
+        {"axis": "context", "severity": "blocker", "quote": "converts 38% better than a static page",
+         "problem": "Invented figure. Nothing in the request supports it, and the executor will "
+                    "treat it as given fact.",
+         "fix": "Replace it with a marked placeholder, or state the assumption explicitly."},
+    ],
+    "strengths": ["Every structural check passes"],
+    "scores": {
+        "goal": {"note": "Outcome stated.", "score": 4},
+        "context": {"note": "One invented figure.", "score": 1},
+        "inputs": {"note": "Named.", "score": 3},
+        "deliverable": {"note": "Pinned.", "score": 4},
+        "criteria": {"note": "Observable.", "score": 4},
+        "constraints": {"note": "Bounded.", "score": 3},
+        "procedure": {"note": "Ordered.", "score": 3},
+        "autonomy": {"note": "Trigger named.", "score": 3},
+        "verification": {"note": "Check-then-report.", "score": 4},
+        "consistency": {"note": "No conflict.", "score": 4},
+        "economy": {"note": "Tight.", "score": 4},
+        "robustness": {"note": "Stated.", "score": 3},
+    },
+}
+
 CRITIQUE_SHIP = {
     "verdict": "ship",
     "summary": "Executable as written: the criteria are observable and the exclusions are explicit.",
@@ -228,11 +280,17 @@ def payload_for(kind: str, attempt: int, mode: str = "") -> str:
         # Wrapped in prose and a fence on purpose: the parser has to cope.
         return "Here is my analysis:\n```json\n" + json.dumps(DIAGNOSIS) + "\n```"
     if kind == "critique":
+        if mode == "polish":
+            return json.dumps(CRITIQUE_POLISH)
+        if mode == "fabricate":
+            return json.dumps(CRITIQUE_FABRICATE)
         return json.dumps(CRITIQUE_REPAIR if attempt == 0 else CRITIQUE_SHIP)
     if kind == "repair":
         return BAD_REPAIR if mode == "revert" else STRONG_PROMPT
     if kind == "tests":
         return json.dumps(TESTS)
+    if mode in ("polish", "fabricate"):
+        return STRONG_PROMPT
     return WEAK_PROMPT if attempt == 0 else STRONG_PROMPT
 
 
@@ -275,7 +333,8 @@ class Handler(BaseHTTPRequestHandler):
     def route(self):
         parts = self.path.lstrip("/").split("/")
         mode = "normal"
-        if parts and parts[0] in ("truncate", "retry", "nojson", "anthropic", "strict", "revert"):
+        if parts and parts[0] in ("truncate", "retry", "nojson", "anthropic", "strict", "revert",
+                                  "polish", "fabricate"):
             mode = parts[0]
             parts = parts[1:]
         return mode, "/" + "/".join(parts)
