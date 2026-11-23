@@ -32,9 +32,19 @@ say "── offline ────────────────────
 
 say ""
 say "── pipeline (mock provider on :$PORT) ─────────────"
+# A stale listener on the port answers the readiness poll below, so the suite silently talked to
+# someone else's mock — two simultaneous runs produced 16 bogus "Could not connect to the server"
+# failures, and `set -uo pipefail` without -e carried on past them. Refuse instead of guessing.
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  say "  FAIL  port $PORT is already in use — re-run with PORT=<free port>"
+  exit 1
+fi
 python3 Tests/mock_llm.py "$PORT" >/dev/null 2>&1 &
 MOCK=$!
-trap 'kill $MOCK 2>/dev/null' EXIT
+# EXIT does not run when the shell is killed, which left the port held and the next run talking
+# to a corpse. Trap the signals too, and wait for the child so the port is actually free.
+cleanup() { kill "$MOCK" 2>/dev/null; wait "$MOCK" 2>/dev/null; }
+trap cleanup EXIT INT TERM
 for _ in $(seq 1 40); do
   curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 && break
   sleep 0.1
@@ -133,6 +143,23 @@ expect "the view model honours a lower-case rigor" 0 "vm probe: all green" \
 # A typo must not buy the cheap pipeline. `deepish` used to fall back and report PASS.
 expect "an unknown rigor is rejected instead of downgraded" 64 "unknown rigor" \
   -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor deepish
+# The same class of defect on the other two enums: an unknown format ran the wrong wire format,
+# an unknown effort went onto the wire verbatim and failed at the provider, and an unknown target
+# linted against the wrong section set — all three silently.
+expect "an unknown format is rejected" 64 "unknown format" \
+  -- "$BIN" --e2e "$BASE/v1" --key k --model mock --format anthropc
+expect "an unknown effort is rejected" 64 "unknown effort" \
+  -- "$BIN" --e2e "$BASE/v1" --key k --model mock --effort loww
+expect "an unknown lint target is rejected" 64 "unknown target" \
+  -- "$BIN" --lint "$BIN" --target "Agent"
+expect "an unknown e2e target is rejected" 64 "unknown target" \
+  -- "$BIN" --e2e "$BASE/v1" --key k --model mock --target "Agent"
+# `--lint` with no path used to fall through to the GUI and look like a hang.
+expect "lint without a file prints usage" 64 "usage: PromptImprover --lint" \
+  -- "$BIN" --lint
+# Every prompt has to be reachable, or the documented before/after diff misses half of them.
+expect "dump-prompts covers every stage and target" 0 "14 prompts" \
+  -- "$BIN" --dump-prompts
 
 # The revert branch of RepairGuard is the policy both callers share, and the reason strings the
 # panel renders come from it. It was covered only by offline unit cases, never end to end. The run

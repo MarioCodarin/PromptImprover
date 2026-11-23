@@ -18,7 +18,8 @@ enum E2E {
         var rigor: Rigor = .standard
         var json = false
         var outPath: String?
-        /// Dollars per million tokens, taken from the provider's /models pricing block.
+        /// Dollars per million tokens, supplied only by `--price-in` / `--price-out`. The
+        /// provider's `/models` response carries ids, not prices, so nothing can infer this.
         var priceIn: Double?
         var priceOut: Double?
         /// Reasoning effort, when the endpoint declares one. Without this the 400 fallback for
@@ -43,11 +44,33 @@ enum E2E {
             case "--model":
                 if let v = next() { c.model = v; i += 1 }
             case "--format":
-                if let v = next() { c.format = v.lowercased() == "anthropic" ? .anthropic : .openAI; i += 1 }
+                if let v = next() {
+                    // `--format anthropc` used to run the wrong wire format with no warning, which
+                    // is the same class of defect as a typo'd --rigor.
+                    switch v.lowercased() {
+                    case "openai", "oi", "chat": c.format = .openAI
+                    case "anthropic", "messages": c.format = .anthropic
+                    default:
+                        FileHandle.standardError.write(Data(
+                            "unknown format \(v) — use openai or anthropic\n".utf8))
+                        return nil
+                    }
+                    i += 1
+                }
             case "--draft":
                 if let v = next() { c.draft = v; i += 1 }
             case "--target":
-                if let v = next() { c.target = PromptTarget(rawValue: v) ?? .agentTask; i += 1 }
+                if let v = next() {
+                    // A typo silently ran the agent-task section set, so the run was graded
+                    // against the wrong bar and reported PASS.
+                    guard let t = PromptTarget(rawValue: v) else {
+                        let names = PromptTarget.allCases.map { "\"\($0.rawValue)\"" }.joined(separator: ", ")
+                        FileHandle.standardError.write(Data(
+                            "unknown target \(v) — use one of: \(names)\n".utf8))
+                        return nil
+                    }
+                    c.target = t; i += 1
+                }
             case "--rigor":
                 if let v = next() {
                     // A typo must not buy the cheap pipeline. `deepish` used to fall back to
@@ -66,7 +89,18 @@ enum E2E {
             case "--price-out":
                 if let v = next() { c.priceOut = Double(v); i += 1 }
             case "--effort":
-                if let v = next() { c.effort = v; i += 1 }
+                if let v = next() {
+                    // Sent verbatim as `reasoning_effort`, so `--effort loww` reached the provider
+                    // and failed there with a 400 that read like a model problem. The accepted
+                    // values are the ones the wire format defines.
+                    let allowed = ["low", "medium", "high", "none", "minimal", "xhigh"]
+                    guard allowed.contains(v.lowercased()) else {
+                        FileHandle.standardError.write(Data(
+                            "unknown effort \(v) — use one of: \(allowed.joined(separator: ", "))\n".utf8))
+                        return nil
+                    }
+                    c.effort = v.lowercased(); i += 1
+                }
             case "--answer-questions":
                 c.answerQuestions = true
             case "--json":
@@ -235,9 +269,12 @@ enum E2E {
                     "calls": calls,
                     "tokens_in": client.usage.inputTokens,
                     "tokens_out": client.usage.outputTokens,
-                    "cost_usd": cost ?? -1,
+                    // `null`, not -1: a sentinel that looks like a measurement gets averaged by
+                    // the next script that reads this file. No price flags means the cost was
+                    // never computed, which is an absence, not a negative number.
+                    "cost_usd": cost.map { $0 as Any } ?? NSNull(),
                     "structure": lint.score,
-                    "rubric": critique.map { $0.total(for: c.target) } ?? -1,
+                    "rubric": critique.map { $0.total(for: c.target) as Any } ?? NSNull(),
                     "clean": lint.isClean,
                     "issues": lint.issues.map { ["id": $0.id, "severity": $0.severity.rawValue, "title": $0.title] },
                     // Reduced, not `uniqueKeysWithValues`: a stage stamped twice would trap, and

@@ -15,9 +15,32 @@ struct PromptImproverApp: App {
             exit(0)
         }
         if args.contains("--selftest") { exit(SelfTest.run()) }
-        if let i = args.firstIndex(of: "--lint"), i + 1 < args.count {
-            let target = args.firstIndex(of: "--target").flatMap { $0 + 1 < args.count ? PromptTarget(rawValue: args[$0 + 1]) : nil } ?? .agentTask
-            let unanswered = args.firstIndex(of: "--unanswered").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil } ?? 0
+        if let i = args.firstIndex(of: "--lint") {
+            // Without a path this fell through to the GUI, so a mistyped invocation opened a
+            // menu-bar app and looked like a hang instead of printing usage.
+            guard i + 1 < args.count else {
+                FileHandle.standardError.write(Data("usage: PromptImprover --lint <file> [--target \"Agent task\"] [--unanswered N]\n".utf8))
+                exit(64)
+            }
+            // A mistyped target silently linted as an agent task, which is the wrong section set
+            // and therefore the wrong verdict. Same rule as --rigor: name the accepted values.
+            var target = PromptTarget.agentTask
+            if let t = args.firstIndex(of: "--target"), t + 1 < args.count {
+                guard let parsed = PromptTarget(rawValue: args[t + 1]) else {
+                    let names = PromptTarget.allCases.map(\.rawValue).joined(separator: "\", \"")
+                    FileHandle.standardError.write(Data("unknown target \"\(args[t + 1])\" — use one of: \"\(names)\"\n".utf8))
+                    exit(64)
+                }
+                target = parsed
+            }
+            var unanswered = 0
+            if let u = args.firstIndex(of: "--unanswered"), u + 1 < args.count {
+                guard let n = Int(args[u + 1]), n >= 0 else {
+                    FileHandle.standardError.write(Data("--unanswered needs a count, got \"\(args[u + 1])\"\n".utf8))
+                    exit(64)
+                }
+                unanswered = n
+            }
             exit(SelfTest.lintFile(args[i + 1], target: target, unanswered: unanswered))
         }
         if args.contains("--dump-prompts") { SelfTest.dumpPrompts(); exit(0) }
@@ -41,7 +64,16 @@ struct PromptImproverApp: App {
         }
         if let i = args.firstIndex(of: "--e2e") {
             guard let config = E2E.parse(Array(args[i...])) else {
-                FileHandle.standardError.write(Data("usage: PromptImprover --e2e <baseURL> [--key K] [--model M] [--format openai|anthropic] [--draft TEXT] [--target \"Agent task\"] [--rigor Fast|Standard|Deep] [--out FILE] [--json]\n".utf8))
+                // The usage line listed seven of the eleven flags `E2E.parse` accepts, so a
+                // mistyped run hid the four that would have fixed it: --effort, --price-in,
+                // --price-out and --answer-questions.
+                FileHandle.standardError.write(Data("""
+                usage: PromptImprover --e2e <baseURL> [--key K] [--model M] [--format openai|anthropic] \
+                [--draft TEXT] [--target \"Agent task\"] [--rigor Fast|Standard|Deep] [--answer-questions] \
+                [--effort low|medium|high|none|minimal|xhigh] [--out FILE] [--price-in N] [--price-out N] \
+                [--json]
+
+                """.utf8))
                 exit(64)
             }
             // No UI exists yet at this point, so pump the runloop while the async run completes.

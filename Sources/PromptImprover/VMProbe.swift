@@ -171,8 +171,10 @@ enum VMProbe {
             _ = await settle(vm5, until: { !$0.isBusy }, timeout: 5)
             check("stopping a re-verify drops the pre-repair verdict", vm5.critique == nil,
                   "critique still \(vm5.critique == nil ? "nil" : "set")")
-            check("stopping a re-verify stops claiming an outcome",
-                  vm5.repairOutcome == .none && vm5.repairNote == nil,
+            // The outcome describes the repaired text, which is still on screen, so it stays. It
+            // is the only explanation of why the prompt reads the way it does.
+            check("stopping a re-verify keeps the repair outcome it earned",
+                  vm5.repairOutcome == .applied,
                   "outcome \(vm5.repairOutcome)")
             check("stopping a re-verify keeps the repaired text", !vm5.output.isEmpty,
                   "\(vm5.output.count) chars")

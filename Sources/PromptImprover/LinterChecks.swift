@@ -18,12 +18,17 @@ struct LintContext {
     /// What the user originally asked for, so "is this a copy" is answerable.
     let draft: String
 
+    /// Artefacts a bound or a format declaration can be scoped to. Shared by `limits` and
+    /// `formats` so the two checks cannot disagree about what "the same deliverable" means.
+    static let partTokens: Set<String> = ["summary", "appendix", "section", "introduction",
+        "conclusion", "abstract", "executive", "chapter", "body", "title", "caption",
+        "description", "file", "files", "guide", "readme", "email", "letter", "article",
+        "memo", "changelog", "note", "post", "paragraph", "table"]
+
     var lower: String { text.lowercased() }
     var wordTokens: [Substring] { text.split(whereSeparator: \.isWhitespace) }
     var headings: [String] { PromptLinter.headings(lines) }
 }
-
-import Foundation
 
 /// The fifteen structural checks, one function each.
 ///
@@ -83,7 +88,6 @@ enum LinterChecks {
         let lower = c.lower
         let headings = c.headings
         let target = c.target
-        let draft = c.draft
         return PromptLinter.requiredSections(for: c.target).map { name, alternatives in
             // A chat message is prose: it has no headings, so its required elements are matched
                 // against the body. Demanding markdown structure of a chat message flagged every
@@ -324,7 +328,16 @@ enum LinterChecks {
                                   "DNS", "TLS", "SSL", "SNI", "SAML", "SSO", "AWS", "GCP", "IAM", "KMS",
                                   "CMK", "UUID", "PK", "PCI", "DSS", "REST", "GRPC", "DB", "TTL", "MFA",
                                   "UAT", "QA", "BI", "ETL", "VPC", "ARN", "GUID", "SHA", "AES", "RSA",
-                                  "HTTP2", "IP", "IPV4", "IPV6", "FQDN", "CDN", "WAF", "ORM", "SDLC"]
+                                  "HTTP2", "IP", "IPV4", "IPV6", "FQDN", "CDN", "WAF", "ORM", "SDLC",
+                                  // Standards, compliance regimes and accessibility vocabulary. These
+                                  // appear in pairs — "meets WCAG AA", "SOC 2", "GDPR DPA" — and two
+                                  // adjacent caps tokens is exactly the run rule, so a correct
+                                  // accessibility requirement was reported as shouting.
+                                  "WCAG", "WAI", "ARIA", "AA", "AAA", "GDPR", "HIPAA", "SOX", "CCPA",
+                                  "FERPA", "COPPA", "SOC", "DPA", "PII", "PHI", "SEO", "CRM", "ERP",
+                                  "KPI", "OKR", "MVP", "POC", "ETA", "FYI", "ASAP", "NPS", "CSAT",
+                                  "MRR", "ARR", "DAU", "MAU", "CTR", "ROAS", "B2B", "B2C", "SAAS",
+                                  "PAAS", "IAAS", "PDF", "CSV", "PNG", "JPEG", "SVG", "GIF", "MP4"]
         // Strip the places where caps are structural rather than emphatic: fenced blocks,
         // `code spans`, {{PLACEHOLDERS}} and table headers. A format placeholder like file.go:LINE
         // is not shouting, and neither is an identifier.
@@ -392,7 +405,6 @@ enum LinterChecks {
         let text = c.text
         let lower = c.lower
         let unansweredQuestions = c.unansweredQuestions
-        let draft = c.draft
         // Distinct fields, not occurrences: {{LAST DAY}} used three times is one unfilled slot.
         // A resignation email legitimately needs six of them, and counting uses made a correct
         // prompt look like a draft.
@@ -426,9 +438,6 @@ enum LinterChecks {
     /// 8. Unanswered questions must surface as assumptions, not vanish.
     static func assumptions(_ c: LintContext) -> Issue? {
         let lines = c.lines
-        let lower = c.lower
-        let headings = c.headings
-        let target = c.target
         let unansweredQuestions = c.unansweredQuestions
         guard unansweredQuestions > 0 else { return nil }
         // A heading with nothing under it is the failure this check exists to catch, but so is
@@ -516,11 +525,24 @@ enum LinterChecks {
         // constraint: it says what not to do when a value is missing, not which value was picked.
         // Counting those let a prompt that had decided nothing about the open questions pass,
         // which is the exact failure this check exists to catch.
-        let chose = ["assum", "default to", "by default", "treat it as", "treat the",
-                     "treating it as", "i chose", "i picked", "we chose"]
+        let chose = ["assume", "assumed", "assuming", "default to", "by default",
+                     "treat it as", "treat the", "treating it as", "i chose", "i picked", "we chose"]
         let proseOnly = lines.filter { PromptLinter.headingTitle(of: $0) == nil }
             .joined(separator: "\n").lowercased()
-        let hasInline = chose.contains { proseOnly.contains($0) }
+        // "never assume a brand name" records nothing — it is the gap-handling instruction this
+        // list is supposed to exclude, written with the verb the list keys on. A negation in front
+        // of the phrase means no decision was made.
+        let negations = ["never ", "not ", "don't ", "do not ", "no ", "without ", "avoid "]
+        func records(_ phrase: String) -> Bool {
+            var from = proseOnly.startIndex
+            while let r = proseOnly.range(of: phrase, range: from..<proseOnly.endIndex) {
+                let head = String(proseOnly[proseOnly.startIndex..<r.lowerBound].suffix(12))
+                if !negations.contains(where: { head.hasSuffix($0) }) { return true }
+                from = r.upperBound
+            }
+            return false
+        }
+        let hasInline = chose.contains { records($0) }
         guard !(hasSection || hasInline) else { return nil }
         return PromptLinter.Issue(id: "silent-defaults", severity: .major,
                      title: "\(unansweredQuestions) question\(unansweredQuestions == 1 ? "" : "s") left unanswered, no assumptions listed",
@@ -534,7 +556,7 @@ enum LinterChecks {
         let formats = ["json", "markdown", "csv", "yaml", "xml", "table", "bullet", "prose", "html"]
         // A format counts only when the sentence that names it does not also offer an
         // alternative. Testing the whole document meant one " or " anywhere silenced the check.
-        func declares(_ f: String) -> Bool {
+        func declares(_ f: String) -> String? {
             for raw in lower.split(whereSeparator: { ".!?\n".contains($0) }) {
                 // "Also emit a table" refers back to the previous sentence, so a bare mention
                 // in a follow-on sentence still declares that format.
@@ -575,9 +597,23 @@ enum LinterChecks {
                                    "asked for", "otherwise", "depending on"]
                 if conditional.contains(where: { t.contains($0) }),
                    !assertsBoth.contains(where: { t.contains($0) }) { continue }
-                return true
+                // The artefact this format belongs to, scoped exactly as `limits` scopes a word
+                // bound: the nearest one named before it in the same sentence. "Return the summary
+                // as JSON, and the appendix as a Markdown file" is two contracts for two
+                // deliverables; without this it read as one contract with two formats, which is
+                // the false positive `limits` was narrowed to avoid in the same release.
+                return nearestPart(in: t, before: t.range(of: f)?.lowerBound)
             }
-            return false
+            return nil
+        }
+        /// The nearest artefact named before `cut` in one sentence, or "" for the whole
+        /// deliverable. Shared with `limits` so both checks scope a declaration the same way.
+        func nearestPart(in text: String, before cut: String.Index?) -> String {
+            guard let cut else { return "" }
+            let words = text[text.startIndex..<cut]
+                .split(whereSeparator: { !$0.isLetter }).map { $0.lowercased() }
+            for w in words.reversed() where LintContext.partTokens.contains(w) { return w }
+            return ""
         }
         // "The record in Markdown, and a JSON summary alongside it" is one contract with two
         // deliverables, not a contradiction. A conflict is two formats for the same output.
@@ -594,12 +630,19 @@ enum LinterChecks {
                 return artefactWords.contains { t.contains($0) }
             }
         }
-        let declared = formats.filter(declares)
-        // A second format named in its own sentence, alongside a first, is a second deliverable.
-        let separate = declared.filter(declaresSeparateArtefact)
-        // `declared.count - separate.count` is the number of formats with no "alongside" marker.
-        // One of them is the primary format; a second unmarked one is the conflict.
-        guard declared.count - separate.count > 1 else { return nil }
+        // Each declaration carries the artefact it governs and whether it was marked as a second
+        // deliverable. A conflict needs two formats on the *same* artefact, neither marked separate.
+        var pairs: [(format: String, part: String)] = []
+        for f in formats {
+            guard let part = declares(f), !declaresSeparateArtefact(f) else { continue }
+            pairs.append((f, part))
+        }
+        let declared = formats.filter { declares($0) != nil }
+        var conflict = false
+        for (i, a) in pairs.enumerated() {
+            for b in pairs[(i + 1)...] where a.part == b.part { conflict = true }
+        }
+        guard conflict else { return nil }
         return PromptLinter.Issue(id: "format-conflict", severity: .major, title: "Conflicting output formats",
                      detail: "Declares \(declared.joined(separator: ", ")) without an either/or.",
                      fix: "Pick one format, or state which conditions choose between them.")
@@ -623,11 +666,10 @@ enum LinterChecks {
         // Matching the line instead of the number was wrong in both directions. It skipped every
         // line mentioning a part at all, so "the email under 250 words … the email at least 600"
         // — the canonical contradiction — passed; and `contains` made "file" match "profile".
-        let partTokens = ["summary", "appendix", "section", "introduction", "conclusion",
-                          "abstract", "executive", "chapter", "body", "title", "caption",
-                          "description", "file", "files", "guide", "readme", "email", "letter",
-                          "article", "memo", "changelog", "note", "post", "paragraph", "table"]
+        let partTokens = LintContext.partTokens
         let partPhrases = ["release note", "cover letter", "press release"]
+        // Pronouns that stand in for the artefact named in the previous bound.
+        let pronouns: Set<String> = ["it", "its", "they", "them", "their", "this", "these", "those"]
 
         struct Bound { let value: Int; let isFloor: Bool; let part: String }
         for unit in globalUnits {
@@ -648,6 +690,16 @@ enum LinterChecks {
                             break
                         }
                         if partTokens.contains(tokens[j]) { part = tokens[j]; break }
+                    }
+                    // "The email must be at least 600 words. Keep it under 250 words." — the
+                    // second bound names no artefact, because the sentence uses a pronoun for the
+                    // one just named. Without this, the two bounds landed in different groups and
+                    // the canonical contradiction was never seen. A pronoun inherits the nearest
+                    // preceding part; anything else stays scoped to the whole deliverable.
+                    if part.isEmpty,
+                       tokens[max(0, i - 5)..<i].contains(where: { pronouns.contains($0) }),
+                       let last = bounds.last?.part, !last.isEmpty {
+                        part = last
                     }
                     // Classify by the bound word nearest the number, not by the unit alone:
                     // "at least 250 words … at most 600 words" is a range, not a conflict.
@@ -820,11 +872,23 @@ enum LinterChecks {
             // a substring test on "review" made every delivered reply that mentioned a review
             // look like a request for one.
             // Not "rewritten": that is the handover ("here's your rewritten reply"), not a request.
-            let requests = ["rewrite", "fix", "summarise", "summarize", "tell me",
+            // "write" was missing, and it is the commonest request verb there is. A chat prompt
+            // that opened "Write a summary of the attached report…" and forbade a handover phrase
+            // ("never open with \"Here's your summary\"") was graded as the handover itself — a
+            // major, so a clean prompt bought a repair call to fix a defect it did not have.
+            //
+            // It is listed with its objects rather than bare, because a bare "write" also matches
+            // "write back if you need anything", which is a closing pleasantry in a delivered reply.
+            // "Write a summary" is a directive; "write back" is not.
+            //
+            // "please" is matched word-bounded like the rest: the trailing space made it match only
+            // before punctuation, so "please rewrite this" exempted nothing.
+            let requests = ["write a", "write an", "write the", "write me", "write up", "write one",
+                            "rewrite", "fix", "summarise", "summarize", "tell me",
                             "explain", "convert", "turn it", "turn this", "make it", "give me",
                             "produce", "draft", "describe", "improve", "shorten", "expand",
                             "translate", "correct", "help me", "can you", "could you", "i need",
-                            "i want", "please "]
+                            "i want", "please"]
             let lowered = text.lowercased()
             func word(_ needle: String) -> Bool {
                 var from = lowered.startIndex

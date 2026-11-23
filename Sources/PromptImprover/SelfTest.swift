@@ -119,6 +119,31 @@ enum SelfTest {
               ResponseParsing.jsonObject(from: #"{"a":1,"b":[1,2,],}"#)?["a"] as? Int == 1)
         check("json: a trailing comma inside a string is left alone",
               ResponseParsing.jsonObject(from: #"{"a":"x,}y"}"#)?["a"] as? String == "x,}y")
+        // A schema example is legal JSON, so "first parseable object" returned the example and
+        // dropped the answer. The diagnosis came back empty with risk "low", and the critique came
+        // back `ship` with no issues — a prompt the critic never scored was treated as passing.
+        let schemaFirst = #"Your reply must be a JSON object with this shape: {"brief": "", "findings": [], "questions": []}"#
+            + "\n\nNow the analysis: " + #"{"brief": "The draft names no audience.", "risk": "high", "findings": [{"code": "D01", "quote": "make me a page"}]}"#
+        let dSchema = ResponseParsing.parseDiagnosis(schemaFirst)
+        check("json: a schema example before the diagnosis does not win",
+              dSchema.brief == "The draft names no audience." && dSchema.risk == "high"
+                  && dSchema.findings.count == 1,
+              "brief=[\(dSchema.brief)] risk=\(dSchema.risk) findings=\(dSchema.findings.count)")
+        let emptyFirst = ResponseParsing.parseDiagnosis(#"Reply with {} when there is nothing to say. {"brief": "real", "risk": "high"}"#)
+        check("json: an empty object before the answer does not win",
+              emptyFirst.brief == "real", "brief=[\(emptyFirst.brief)]")
+        let critiqueExample = #"Shape: {"verdict": "ship", "issues": []}"# + "\nActual: "
+            + #"{"verdict": "repair", "issues": [{"axis": "criteria", "problem": "No threshold.", "severity": "major"}]}"#
+        let cExample = ResponseParsing.parseCritique(critiqueExample)
+        check("json: a critique schema example does not become the verdict",
+              cExample?.verdict == "repair" && cExample?.issues.count == 1,
+              "verdict=\(cExample?.verdict ?? "nil") issues=\(cExample?.issues.count ?? -1)")
+        // The fix must not swing the other way: a genuine "ship, nothing wrong" is empty-looking
+        // and still has to parse, or every clean prompt reads as an unreadable verdict.
+        let genuineShip = ResponseParsing.parseCritique(#"{"verdict": "ship", "issues": [], "summary": "Tight and specific."}"#)
+        check("json: a genuine ship with no issues still parses",
+              genuineShip?.verdict == "ship" && genuineShip?.summary == "Tight and specific.",
+              "verdict=\(genuineShip?.verdict ?? "nil")")
         check("json: a truncated object returns nil rather than a partial",
               ResponseParsing.jsonObject(from: #"{"a":1, "b": {"c":2}"#) == nil)
 
@@ -896,6 +921,18 @@ enum SelfTest {
         notFlagged("limits: two artefacts with their own budgets do not conflict",
                    "limit-conflict-words",
                    good + "\nThe user guide needs at least 800 words; the release note stays under 200.\n")
+        // The canonical contradiction, written the way a person writes it: the second sentence uses
+        // a pronoun for the artefact the first one named. No part token is in the window, so the
+        // two bounds landed in different groups and the conflict was invisible.
+        flagged("limits: a pronoun inherits the artefact it stands for", "limit-conflict-words",
+                good + "\nThe email must be at least 600 words.\nKeep it under 250 words.\n")
+        // A format belongs to an artefact the same way a word bound does. Two formats on two
+        // deliverables is one contract each, not a contradiction.
+        notFlagged("formats: two artefacts with their own formats do not conflict",
+                   "format-conflict",
+                   good + "\nReturn the summary as JSON, and the appendix as a Markdown file.\n")
+        flagged("formats: two formats on one artefact still conflict", "format-conflict",
+                good + "\nReturn the report as Markdown, and also as JSON.\n")
 
         // A bolded sub-title inside a section must not empty the section body. Ending a section at
         // the next heading of any kind switched off every check that reads the body.
@@ -928,6 +965,11 @@ enum SelfTest {
         flagged("executed: a title does not disguise a handover", "executed",
                 "Rewritten reply, under 100 words:\n\nHere is the reply you asked for: Dear customer, "
                 + "we have reviewed your case and the refund is on its way.", .chat)
+        // "write back if you need anything" is a closing pleasantry, not a request, so it must not
+        // exempt the delivery it closes.
+        flagged("executed: a closing 'write back' does not exempt a handover", "executed",
+                "Here's your summary: the payment worker lost messages for 40 minutes because the "
+                + "retry queue was drained. Write back if you need anything.", .chat)
         notFlagged("executed: a request quoting an artefact is not a handover", "executed",
                    "Here is the reply our support team sent, in full: Dear customer, we have reviewed "
                    + "your case. Rewrite it so it does not promise a date, keep it under 100 words, "
@@ -977,6 +1019,12 @@ enum SelfTest {
                 good + "\nDO_NOT_EVER_SHIP_THIS_WITHOUT_ASKING_ME_FIRST.\n")
         flagged("shouting: a table body is still scanned", "shouting",
                 good + "\n| RULE | DETAIL |\n| --- | --- |\n| NEVER EVER SHIP THIS | unrecoverable |\n")
+        // A standard's name is two adjacent caps tokens, which is exactly the run rule. A live run
+        // failed a correct accessibility requirement for it.
+        notFlagged("shouting: a standard's name is not emphasis", "shouting",
+                   good + "\nText contrast meets WCAG AA on every surface.\n")
+        flagged("shouting: real emphasis still fires", "shouting",
+                good + "\nMUST READ THIS before you ship anything at all.\n")
         notFlagged("shouting: a table header is not shouting", "shouting",
                    good + "\n| SOURCE | TARGET |\n| --- | --- |\n| a | b |\n")
         notFlagged("shouting: an identifier is not shouting", "shouting",
@@ -1002,6 +1050,18 @@ enum SelfTest {
         check("linter: a deferred decision is not a recorded one",
               PromptLinter.lint(deferred, target: .agentTask, unansweredQuestions: 2)
                   .issues.contains { $0.id == "silent-defaults" })
+
+        // "never assume a brand name" is the gap-handling instruction the list exists to exclude,
+        // written with the verb the list keys on. A negation in front means no decision was made.
+        let negatedAssume = """
+        Draft the product page copy for a new coffee subscription. There are no product details,
+        brand assets, testimonials or pricing in the brief. Do not invent pricing and never assume
+        a brand name. Keep the copy under 200 words, plain prose, no preamble and no sign-off.
+        """
+        check("linter: 'never assume' is not a recorded decision",
+              PromptLinter.lint(negatedAssume, target: .chat, unansweredQuestions: 3)
+                  .issues.contains { $0.id == "silent-defaults" },
+              "recorded nothing about the open questions")
 
         // A prompt is written in the imperative, so a recording phrased in the second person —
         // "Assume a developer will replace the placeholders" — was invisible to a check that only
@@ -1159,21 +1219,33 @@ enum SelfTest {
 
     /// Prints every system prompt with a rough token estimate, so prompt edits can be reviewed as
     /// diffs instead of guessed at.
+    /// Prints every system prompt in full, with a token estimate.
+    ///
+    /// The point of this command is `diff` — the README tells contributors to run it before and
+    /// after a prompt edit and read the result as a code change. It printed only a name and a
+    /// token count, so there was nothing to diff, and it covered six of the twelve builders, so
+    /// half the prompts could change without appearing at all.
     static func dumpPrompts() {
-        let items: [(String, String)] = [
-            ("analyzer[agent]", MetaPrompts.analyzer(target: .agentTask)),
-            ("writer[agent]", MetaPrompts.writer(target: .agentTask)),
-            ("writer[chat]", MetaPrompts.writer(target: .chat)),
-            ("critic[agent]", MetaPrompts.critic(target: .agentTask)),
-            ("repair", MetaPrompts.repair),
-            ("tests", MetaPrompts.evalSuite(target: .agentTask)),
-        ]
+        var items: [(String, String)] = []
+        for target in PromptTarget.allCases {
+            let slug = target.rawValue.lowercased().replacingOccurrences(of: " ", with: "-")
+            items.append(("analyzer[\(slug)]", MetaPrompts.analyzer(target: target)))
+            items.append(("writer[\(slug)]", MetaPrompts.writer(target: target)))
+            items.append(("critic[\(slug)]", MetaPrompts.critic(target: target)))
+            items.append(("tests[\(slug)]", MetaPrompts.evalSuite(target: target)))
+        }
+        items.append(("repair", MetaPrompts.repair))
+        items.append(("refine", MetaPrompts.refineInstruction("<the user's revision instruction>")))
         var total = 0
         for (name, body) in items {
             let tokens = body.count / 4
             total += tokens
-            print("── \(name) — ~\(tokens) tokens, \(body.count) chars")
+            // Fenced and delimited so the output diffs cleanly and a prompt containing its own
+            // headings cannot be mistaken for the next section's header.
+            print("═══ \(name) — ~\(tokens) tokens, \(body.count) chars ═══")
+            print(body)
+            print("")
         }
-        print("total ≈ \(total) tokens of system prompt")
+        print("total ≈ \(total) tokens of system prompt across \(items.count) prompts")
     }
 }

@@ -312,14 +312,12 @@ enum PromptLinter {
         switch target {
         case .agentTask: return (60, 1400)
         case .systemPrompt: return (50, 1100)
-        // A chat turn is one sentence by nature: "Summarise the attached report in three bullets,
-        // plain prose, no preamble" is complete at eleven words. The floor was 30, which flagged
-        // most casual chat messages. A contentless one is still caught — by the output-contract
-        // check, which is the sound test for "this constrains nothing".
-        // 30, not 8. The floor was lowered to admit a terse but complete chat request, and it
-        // also admitted "Can you help me with this thing, under 100 words please?" — contentless,
-        // and it clears the output-contract check on the word "words" alone, so nothing else
-        // catches it. A chat message that says less than this is genuinely missing something.
+        // 30, not 8. A chat turn is short by nature — "Summarise the attached report in three
+        // bullets, plain prose, no preamble" is complete at eleven words — so the floor cannot be
+        // high. But lowering it to 8 admitted "Can you help me with this thing, under 100 words
+        // please?": contentless, and it clears the output-contract check on the word "words"
+        // alone, so nothing else catches it. 30 is the point where a message that says less is
+        // genuinely missing something rather than merely terse.
         case .chat: return (30, 500)
         }
     }

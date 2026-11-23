@@ -51,8 +51,26 @@ enum ResponseParsing {
     /// brief mentioning `{{name}}` or an example object before the answer used to consume the one
     /// attempt, and every consumer then degraded silently — `parseDiagnosis` returned an all-default
     /// diagnosis, so the writer ran blind with no findings and no questions.
-    static func jsonObject(from raw: String) -> [String: Any]? {
+    /// `rank` picks between several parseable objects; the highest score wins, first on a tie.
+    ///
+    /// Models routinely open with the schema before the content — "your reply must be a JSON object
+    /// with this shape: `{"brief": "", "findings": [], "questions": []}`" — and that example is
+    /// *valid JSON*, so it closes at depth 0 and was returned as the answer. The real diagnosis
+    /// after it was never read: `parseDiagnosis` returned an empty brief with risk "low" and no
+    /// findings, and `parseCritique` returned `verdict: ship` with no issues, so a prompt the critic
+    /// never scored was treated as passing.
+    ///
+    /// Returning the first parseable object is the bug. Skipping spans that "look empty" is the
+    /// wrong fix, because a legitimate `{"verdict": "ship", "issues": []}` is empty-looking too.
+    /// So every span is parsed and the caller's rank decides which one is the answer.
+    static func jsonObject(from raw: String,
+                           rank: (([String: Any]) -> Int)? = nil) -> [String: Any]? {
         let text = unfence(stripThinking(raw))
+        var best: ([String: Any], Int)?
+        func consider(_ obj: [String: Any]) {
+            let score = rank?(obj) ?? 0
+            if best == nil || score > best!.1 { best = (obj, score) }
+        }
         // One scan. A candidate object is a span that opens at brace depth 0 and closes back at 0,
         // so a `{` nested inside an unterminated one is never offered as a start: falling back to
         // an inner object would return a partial parse that looks like a valid answer, which is
@@ -85,9 +103,11 @@ enum ResponseParsing {
                     guard depth > 0 else { i = text.index(after: i); continue }
                     depth -= 1
                     if depth == 0, let s = start {
-                        if let obj = parseObject(text[s...i]) { return obj }
-                        // The span was not an object: forget it and keep scanning, so a second
-                        // object after a prose brace is still found.
+                        if let obj = parseObject(text[s...i]) {
+                            if rank == nil { return obj }
+                            consider(obj)
+                        }
+                        // Keep scanning: an example of the schema may come before the answer.
                         start = nil
                     }
                 default: break
@@ -101,7 +121,7 @@ enum ResponseParsing {
         // at 1 — so retrying would return `{"c":2}` for the truncated object, and a partial parse
         // that looks like a valid answer is worse than none. The callers already treat nil as "the
         // model said nothing" and fall back to the linter's own findings.
-        return nil
+        return best?.0
     }
 
     /// Parses one brace-balanced slice, tolerating a trailing comma before `}` or `]`.
@@ -150,7 +170,16 @@ enum ResponseParsing {
 
     static func parseDiagnosis(_ raw: String) -> Diagnosis {
         var d = Diagnosis()
-        guard let obj = jsonObject(from: raw) else { return d }
+        // An example of the schema is not a diagnosis. `{"brief": "", "findings": [], "questions":
+        // []}` scores 0 here and loses to the real answer that follows it; if no span carries any
+        // content, the scan returns the empty one and this degrades exactly as it did before.
+        guard let obj = jsonObject(from: raw, rank: { o in
+            let brief = (o["brief"] as? String) ?? ""
+            return (brief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : 100)
+                + (o["findings"] as? [Any] ?? []).count
+                + (o["scores"] as? [String: Any] ?? [:]).count
+                + (o["questions"] as? [Any] ?? []).count
+        }) else { return d }
 
         d.brief = (obj["brief"] as? String) ?? ""
         d.taskType = (obj["task_type"] as? String) ?? ""
@@ -198,7 +227,18 @@ enum ResponseParsing {
     }
 
     static func parseCritique(_ raw: String) -> Critique? {
-        guard let obj = jsonObject(from: raw) else { return nil }
+        // A schema example (`{"verdict": "ship", "issues": []}`) is legal JSON and used to be
+        // returned as the verdict, so a prompt the critic never scored was read as passing. The
+        // real critique carries issues, scores or a summary and outranks it.
+        guard let obj = jsonObject(from: raw, rank: { o in
+            let verdict = (o["verdict"] as? String)?.lowercased() ?? ""
+            let legal = verdict == "ship" || verdict == "repair"
+            let summary = (o["summary"] as? String) ?? ""
+            return (legal ? 100 : 0)
+                + (o["issues"] as? [Any] ?? []).count
+                + (o["scores"] as? [String: Any] ?? [:]).count
+                + (summary.isEmpty ? 0 : 1)
+        }) else { return nil }
         var c = Critique()
         c.verdict = (obj["verdict"] as? String)?.lowercased() == "repair" ? "repair" : "ship"
         c.summary = (obj["summary"] as? String) ?? ""

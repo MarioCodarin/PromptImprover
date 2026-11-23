@@ -20,6 +20,9 @@ The first path segment selects a failure mode, so plumbing can be tested without
     /anthropic/v1/...  speaks the /messages SSE shape instead of /chat/completions
     /slow/v1/...       every stage takes 1.5s, so a mid-stage Stop can be pressed
     /garbage/v1/...    the verifier's reply is unparseable, so only the linter can gate
+    /revert/v1/...     the repair is worse than the original, so RepairGuard must keep the original
+    /polish/v1/...     the critique objects only to minors on a prompt that already passes: no repair call
+    /fabricate/v1/...  the critique reports a fabricated figure on that same prompt: must repair
 """
 
 import json

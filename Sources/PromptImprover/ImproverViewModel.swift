@@ -435,13 +435,14 @@ final class ImproverViewModel: ObservableObject {
         }
         // Stopping inside a re-check is the case `reverify` itself already handles: the critique in
         // hand scores the *pre-repair* text, and the re-score never lands because `runID` moved on.
-        // Keeping it showed "Rubric 20/100 — Below the bar: …" and "One repair pass was applied.
-        // What is listed above survived it." over a prompt that had just scored 94/100 and shipped.
-        // The same rule as `reverify`: there is no score for what is on screen.
+        // Keeping it showed "Rubric 20/100 — Below the bar: …" over a prompt that had just been
+        // repaired. The same rule as `reverify`: there is no score for what is on screen.
+        //
+        // Only the critique goes. `repairOutcome` and `repairNote` describe `output` — the repaired
+        // text, which is still on screen and still copyable — so clearing them deleted the only
+        // explanation of why the prompt reads the way it does, while keeping the prompt itself.
         if stoppingPhase == .verifying, verifyingRepaired {
             critique = nil
-            repairOutcome = .none
-            repairNote = nil
         }
         // A stopped run still spent what it spent. `finish` is the only other writer of these, so
         // cancelling after two completed calls reported "2 model calls · 0.0s · 0 in / 0 out" —
