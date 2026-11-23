@@ -51,15 +51,18 @@ enum LLMError: LocalizedError {
 /// without this the only way to know what it cost is the provider's dashboard tomorrow.
 final class UsageTracker {
     private let lock = NSLock()
-    private var _input = 0, _output = 0, _cached = 0
+    private var _input = 0, _output = 0, _cached = 0, _cacheWrites = 0
 
     var inputTokens: Int { lock.withLock { _input } }
     var outputTokens: Int { lock.withLock { _output } }
     var cachedTokens: Int { lock.withLock { _cached } }
+    /// Anthropic cache writes, billed above the input rate. Zero on the chat-completions format.
+    var cacheWriteTokens: Int { lock.withLock { _cacheWrites } }
 
     private var lastInput = 0
     private var lastOutput = 0
     private var lastCached = 0
+    private var lastWrites = 0
 
     /// Called once per request. Anthropic reports cumulative totals per message, so the deltas
     /// have to be measured against the start of *that* message, not the whole run.
@@ -68,10 +71,11 @@ final class UsageTracker {
             lastInput = 0
             lastOutput = 0
             lastCached = 0
+            lastWrites = 0
         }
     }
 
-    func observe(input: Int, output: Int, cached: Int) {
+    func observe(input: Int, output: Int, cached: Int, writes: Int = 0) {
         guard input > 0 || output > 0 else { return }
         lock.withLock {
             _input += max(0, input - lastInput)
@@ -79,7 +83,9 @@ final class UsageTracker {
             // Summed, not maxed: reporting the largest single call as the run's cached total
             // misstates what the run spent.
             _cached += max(0, cached - lastCached)
+            _cacheWrites += max(0, writes - lastWrites)
             lastCached = max(lastCached, cached)
+            lastWrites = max(lastWrites, writes)
             lastInput = max(lastInput, input)
             lastOutput = max(lastOutput, output)
         }
@@ -89,11 +95,23 @@ final class UsageTracker {
     ///
     /// Cached input bills at a fraction of the fresh rate, so it is priced separately rather than
     /// ignored: a run that reuses a 2k-token prompt looked free when it was merely cheap.
-    func cost(inputPerM: Double?, outputPerM: Double?, cachedPerM: Double? = nil) -> Double? {
+    func cost(inputPerM: Double?, outputPerM: Double?, cachedPerM: Double? = nil,
+              readRatio: Double = 0.5) -> Double? {
         guard let i = inputPerM, let o = outputPerM else { return nil }
-        let cachedRate = cachedPerM ?? i * 0.1
-        let fresh = max(0, inputTokens - cachedTokens)
-        return (Double(fresh) * i + Double(cachedTokens) * cachedRate + Double(outputTokens) * o) / 1_000_000
+        // The default discount is the wire format's, not one provider's: Anthropic bills cache
+        // reads at 0.1x and writes at 1.25x, the chat-completions format bills cached input at
+        // 0.5x and has no write tier.
+        let cachedRate = cachedPerM ?? i * readRatio
+        let writeRate = i * 1.25
+        // `inputTokens` already includes cache reads and writes, so the fresh remainder is what is
+        // left after both are priced at their own rates.
+        let writes = cacheWriteTokens
+        let reads = cachedTokens
+        let fresh = max(0, inputTokens - reads - writes)
+        return (Double(fresh) * i
+                + Double(reads) * cachedRate
+                + Double(writes) * writeRate
+                + Double(outputTokens) * o) / 1_000_000
     }
 
     var summary: String {
@@ -117,6 +135,16 @@ struct LLMClient {
         func kill() { lock.lock(); dead = true; lock.unlock() }
     }
     let poison = Poison()
+
+    /// Parameters this endpoint has already rejected. Shared across the whole pipeline, so a
+    /// locked-down gateway costs one 400 per parameter per run instead of one per stage.
+    final class Rejected: @unchecked Sendable {
+        private let lock = NSLock()
+        private var names: Set<String> = []
+        func contains(_ name: String) -> Bool { lock.lock(); defer { lock.unlock() }; return names.contains(name) }
+        func add(_ name: String) { lock.lock(); names.insert(name); lock.unlock() }
+    }
+    let rejected = Rejected()
 
     /// Tuning for one call. Nil means "let the server decide".
     struct Options {
@@ -211,7 +239,18 @@ struct LLMClient {
                            model: String,
                            options: Options,
                            yield: (String) -> Void) async throws {
+        // The endpoint's configured effort is an option, not a second fallback inside `body()`.
+        // Reading it there made the 400 fallback below unreachable: clearing the option left the
+        // parameter in the request, so a gateway that rejects `reasoning_effort` rejected every
+        // stage of every run until the user cleared the field by hand.
         var opts = options
+        if opts.reasoningEffort == nil { opts.reasoningEffort = endpoint.reasoningEffort }
+        // Start from what this endpoint has already told us it does not accept.
+        if rejected.contains("stream_options") { opts.streamOptions = false }
+        if rejected.contains("response_format") { opts.jsonMode = false }
+        if rejected.contains("temperature") { opts.temperature = nil }
+        if rejected.contains("max_tokens") { opts.maxTokens = nil }
+        if rejected.contains("reasoning_effort") { opts.reasoningEffort = nil }
         var attempt = 0
         // Counted separately from `attempt`: a parameter fallback is not a transient failure and
         // must not consume the retries meant for a 503.
@@ -235,10 +274,12 @@ struct LLMClient {
                     let lower = body.lowercased()
                     if opts.jsonMode, lower.contains("response_format") {
                         opts.jsonMode = false
+                        rejected.add("response_format")
                         continue
                     }
                     if opts.temperature != nil, lower.contains("temperature") {
                         opts.temperature = nil
+                        rejected.add("temperature")
                         continue
                     }
                     // On the Anthropic wire format max_tokens is required, so clearing it just
@@ -247,14 +288,17 @@ struct LLMClient {
                     if endpoint.format != .anthropic, opts.maxTokens != nil,
                        lower.contains("max_tokens") || lower.contains("max_completion_tokens") {
                         opts.maxTokens = nil
+                        rejected.add("max_tokens")
                         continue
                     }
                     if opts.streamOptions, lower.contains("stream_options") {
                         opts.streamOptions = false
+                        rejected.add("stream_options")
                         continue
                     }
                     if opts.reasoningEffort != nil, lower.contains("reasoning_effort") || lower.contains("reasoning") {
                         opts.reasoningEffort = nil
+                        rejected.add("reasoning_effort")
                         continue
                     }
                 }
@@ -330,7 +374,7 @@ struct LLMClient {
             // Without this the provider omits usage entirely on a streamed reply. Omitted on the
             // retry if the gateway rejects the parameter.
             if o.streamOptions { b["stream_options"] = ["include_usage": true] }
-            if let effort = o.reasoningEffort ?? endpoint.reasoningEffort { b["reasoning_effort"] = effort }
+            if let effort = o.reasoningEffort { b["reasoning_effort"] = effort }
             if let t = o.temperature { b["temperature"] = t }
             if let m = o.maxTokens { b["max_tokens"] = m }
             if o.jsonMode { b["response_format"] = ["type": "json_object"] }
@@ -358,15 +402,24 @@ struct LLMClient {
     }
 
     /// [OI] sends a final chunk with `usage`; Anthropic sends it on `message_start` and `message_delta`.
+    /// Anthropic reports `input_tokens` exclusive of cache reads and cache writes, while the
+    /// chat-completions format includes both in `prompt_tokens`. Summing the three is what makes
+    /// the number mean the same thing on both wire formats.
+    static func anthropicInput(_ u: [String: Any]) -> Int {
+        func n(_ k: String) -> Int { (u[k] as? NSNumber)?.intValue ?? 0 }
+        return n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens")
+    }
+
     private func recordUsage(_ obj: [String: Any]) {
         // Anthropic nests the input counts inside `message` on message_start; only message_delta
         // carries a top-level `usage`, and that one has output tokens. Reading only the top level
         // reported every Anthropic run as zero input tokens.
         if let message = obj["message"] as? [String: Any],
            let nested = message["usage"] as? [String: Any] {
-            usage.observe(input: (nested["input_tokens"] as? NSNumber)?.intValue ?? 0,
+            usage.observe(input: Self.anthropicInput(nested),
                           output: (nested["output_tokens"] as? NSNumber)?.intValue ?? 0,
-                          cached: (nested["cache_read_input_tokens"] as? NSNumber)?.intValue ?? 0)
+                          cached: (nested["cache_read_input_tokens"] as? NSNumber)?.intValue ?? 0,
+                          writes: (nested["cache_creation_input_tokens"] as? NSNumber)?.intValue ?? 0)
             return
         }
         guard let u = obj["usage"] as? [String: Any] else { return }

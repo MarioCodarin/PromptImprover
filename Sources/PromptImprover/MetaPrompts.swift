@@ -1,216 +1,88 @@
 import Foundation
 
-enum PromptTarget: String, CaseIterable, Identifiable {
-    case agentTask = "Agent task"
-    case systemPrompt = "System prompt"
-    case chat = "Chat message"
-    var id: String { rawValue }
-
-    /// What the writer must know about the medium it is writing for.
-    var guidance: String {
-        switch self {
-        case .agentTask:
-            return """
-            TARGET: an autonomous agent in a harness with tools (Claude Code, Codex, OpenCode, a custom loop).
-            Address it in second person. It will run unattended, so it needs:
-            - Autonomy: act by default. Name the action classes that need confirmation first — destructive, \
-            irreversible, visible to others, costly — and say why, instead of a blanket "ask if unsure".
-            - Persistence: finish the work, not the plan. If the task is large, decompose it and confirm each \
-            sub-request is complete before yielding.
-            - Escalation: when a requirement conflicts with what it finds on the ground, report the conflict \
-            and the reading it chose. Obstacles never justify destructive shortcuts.
-            - Verification: a named check per success criterion, and the evidence to show for it.
-            - Final report: what changed, how it was verified, what is still open, which assumptions it made.
-            """
-        case .systemPrompt:
-            return """
-            TARGET: a reusable system prompt that governs every future conversation, not one request.
-            It needs: purpose and audience; how it works (priorities, decision rules); what it must never do \
-            and why; tone and default formatting; how it handles ambiguity, out-of-scope asks and conflicts \
-            between its own rules. Prefer durable principles over rules tied to one scenario. If two rules \
-            could ever conflict, say which wins.
-            """
-        case .chat:
-            return """
-            TARGET: one message pasted into a chat assistant. Compact prose or light structure — headings are \
-            optional, not required. It needs: the goal, only the context the model cannot infer, what the \
-            output must look like, and what "good" means. No autonomy, escalation, persistence or reporting \
-            sections: a chat turn is not an agent run. Aim for under 400 words.
-            """
-        }
-    }
-
-    /// The length envelope the structural check enforces, stated to the writer so it can aim.
-    var lengthTarget: String {
-        switch self {
-        case .agentTask: return "under 900 words; a one-step task may be 150. Never pad to reach a floor"
-        case .systemPrompt: return "under 800 words; a durable-principles prompt may be 250. Never pad to reach a floor"
-        case .chat: return "under 300 words, usually 80 to 200"
-        }
-    }
-
-    /// A worked example in this target's own shape.
-    ///
-    /// One exemplar served all three targets before, and its shape was the agent-task skeleton —
-    /// so a system prompt and a chat message were shown sections they are told to drop, and the
-    /// agent one failed the rubric it was modelling (no stopping condition per phase, no action
-    /// classes with reasons). Each example below scores 4 on the axes it demonstrates.
-    var exemplar: String {
-        switch self {
-        case .agentTask:
-            return """
-            The example shows the shape, not the content. Never reuse its subject, numbers or wording.
-
-            # Add a retry budget to the outbound webhook sender
-
-            ## Objective
-            Stop the sender retrying a dead endpoint forever. Two incidents this quarter came from a worker \
-            pinned on a 404 for six hours: the queue backed up and every other tenant stalled behind it.
-
-            ## Context
-            Tenants configure their own endpoints and about 2% are abandoned each quarter. The sender \
-            currently retries every failure until the job times out, which is what pinned the worker.
-
-            ## Inputs
-            - `internal/webhook/sender.go` — the retry loop.
-            - `docs/webhooks.md` — the delivery contract we promised clients.
-
-            ## Requirements
-            - Cap retries at 5 attempts, backoff 2s to 60s, jittered by 20%.
-            - Treat 4xx except 429 as permanent: one attempt, no retry.
-            - Emit a counter per outcome so queue depth is observable.
-
-            ## Constraints and non-goals
-            - The public `Send` signature stays as it is unless you confirm first. It is visible to \
-            every caller, so changing it is not reversible in review.
-            - Out of scope: the consumer side, and any change to the retry policy of other senders.
-            - Budget: one pull request, under 300 changed lines.
-
-            ## Approach
-            1. Read the sender and the contract. Stop once you can name every retry branch.
-            2. Put the budget behind the existing loop. Stop when all three cases above are handled.
-            3. Add table tests for permanent, transient and exhausted. Stop when all three fail against \
-            the old code.
-            Skip step 3 if the package already has a table-driven retry test; extend it instead.
-
-            ## Output contract
-            One pull request. Description naming the files, the tests and the rollback step, English, \
-            under 250 words. Do not include a changelog entry or a migration note; neither applies.
-
-            ## Success criteria
-            - `go test ./internal/webhook/...` returns 0.
-            - A 404 makes exactly one attempt and a 500 makes five; a test proves both.
-            - The `Send` signature is unchanged in the diff.
-
-            ## Verification
-            Run the package tests and paste the summary line. Then re-read the diff against each \
-            criterion above, one at a time.
-
-            ## Priorities when instructions conflict
-            The delivery contract outranks the current code. If they disagree, follow the contract and \
-            say which reading you chose.
-
-            ## Autonomy and escalation
-            Proceed without asking. Confirm first before changing the public `Send` signature, deleting \
-            an existing test, or touching a second package: the first is visible to every caller, the \
-            others are irreversible in review. Obstacles never justify disabling a test.
-
-            ## Assumptions
-            - "Dead endpoint" means the host resolves but returns 4xx. DNS failure is out of scope.
-            """
-        case .systemPrompt:
-            return """
-            The example shows the shape, not the content. Never reuse its subject or wording.
-
-            You are a triage assistant for a support queue. You classify inbound tickets and draft the \
-            first reply, so a human reviews instead of starting from nothing.
-
-            ## Purpose
-            A reviewer should be able to accept or reject your draft in one read. The reader is \
-            already frustrated by the time they write, so your reply assumes good faith and answers \
-            the question that was asked, not the one that is easiest to answer.
-
-            ## How you work
-            Read everything the ticket links before writing. Classify first, then draft: a draft \
-            written before the classification tends to answer the wrong question.
-            When a ticket names an amount, a date or an identifier, use the one on the linked record \
-            and nothing else.
-
-            ## Priorities when instructions conflict
-            In order, highest first: never state a fact you cannot see on a linked record > never \
-            promise an outcome you cannot authorise > answer the question asked > be brief. When two \
-            of these conflict, the higher one wins and you say in one line what you could not do.
-
-            ## Output contract
-            Two fields: `category`, a single lowercase word from the queue's own taxonomy; `reply`, \
-            plain prose under 120 words with no greeting formula and no sign-off. Do not include an \
-            apology for the delay.
-
-            ## Boundaries
-            Never state a policy that is not in the linked documentation. Never close, merge or \
-            reassign a ticket. If a ticket is abusive, answer it once, factually, and flag it for a \
-            human rather than disengaging.
-
-            ## Assumptions
-            - Ticket text and linked records are the only signal; no call recording or chat history exists.
-            - The queue's taxonomy is supplied at runtime; if it is missing, ask for it rather than
-              inventing a category.
-            """
-        case .chat:
-            return """
-            The example shows the shape, not the content. Never reuse its subject or wording.
-
-            Summarise the incident report below in one paragraph, then list the three decisions it leaves \
-            open. Plain prose, under 150 words, no preamble and no closing offer to help further. Quote \
-            the report for every claim you make, and keep quotes under fifteen words. If it does not \
-            state a cause, write that the cause is unstated rather than inferring one. If the report is \
-            missing a timeline, say so in the list of open decisions instead of reconstructing one.
-            """
-        }
-    }
-
-    /// Section skeleton the writer is told to adapt. Empty sections get dropped, not filled.
-    var skeleton: String {
-        switch self {
-        case .agentTask:
-            return """
-            ## Objective
-            ## Context
-            ## Inputs
-            ## Requirements
-            ## Constraints and non-goals
-            ## Approach
-            ## Output contract
-            ## Success criteria
-            ## Verification
-            ## Priorities when instructions conflict
-            ## Autonomy and escalation
-            ## Assumptions   (only when you had to choose something)
-            """
-        case .systemPrompt:
-            return """
-            ## Purpose
-            ## How you work
-            ## Priorities when instructions conflict
-            ## Output contract
-            ## Boundaries
-            ## Assumptions   (only when you had to choose something)
-            """
-        case .chat:
-            return """
-            ## Objective
-            ## Context        (only facts the model cannot infer)
-            ## What to produce
-            ## Constraints
-            ## Done when
-            """
-        }
-    }
-}
-
-/// Every meta-prompt in the app. The rubric is rendered from `Axis` so the prompt and the UI can
-/// never disagree about what "good" means.
 enum MetaPrompts {
+
+    /// One principle per rubric axis, keyed by axis so `principleBlock` can hand a target only the
+    /// ones it is actually scored on. The previous static block claimed "the critic scores you on
+    /// exactly these twelve" in a message that also told a chat turn to omit autonomy — two direct
+    /// orders about the same thing, and the model had to guess which won.
+    private static let principles: [(Axis, String)] = [
+        (.goal, """
+        State the outcome and why it matters. A model generalises from a purpose better than from a \
+        rule list, and the purpose is what lets it make the thousand decisions you did not foresee. \
+        Specific enough to steer, general enough to cover cases nobody listed.
+        """),
+        (.context, """
+        Give only what the model cannot infer, and say why the task exists now. Context the model can \
+        infer is noise that costs attention. Long supplied material goes in tags, before the \
+        instructions that use it. If there is genuinely no background, say so in one line rather than \
+        leaving the section out or filling it.
+        """),
+        (.inputs, """
+        Name what exists, where it is, and what is missing. Never assume a file, repository, tool or \
+        audience. If there is no input, say so and forbid inventing one.
+        """),
+        (.deliverable, """
+        Fix the output contract: format, structure, length with a number, language, and at least one \
+        thing it must not contain. A short task may pin fewer of these; an unfixed format is the \
+        commonest cause of rework.
+        """),
+        (.criteria, """
+        Every success criterion must be checkable by someone who did not do the work: a command, a \
+        field, a number, a comparison. "High quality" is not a criterion. Each criterion names the \
+        method the executor actually has.
+        """),
+        (.constraints, """
+        Say what is out of scope and what the budget is. State what to do, not only what to avoid: a \
+        prohibition without an alternative just moves the failure. When a "never" is necessary, give \
+        the reason and the replacement behaviour.
+        """),
+        (.procedure, """
+        Order the work, and give each phase a stopping condition — what tells you it is done. An \
+        ordered list with no stopping condition is a wish. A one-step task needs no phases; write the \
+        step and move on.
+        """),
+        (.autonomy, """
+        Default to acting. List the action classes that need confirmation first — destructive, \
+        irreversible, visible to others, costly — each with the reason. Never let an obstacle justify \
+        a destructive shortcut.
+        """),
+        (.verification, """
+        Say how to prove each criterion and what evidence to show. A result nobody checked is a guess. \
+        Verification is part of the task, not an afterthought.
+        """),
+        (.consistency, """
+        Contradictions are the worst defect. List the rules that constrain the same action and check \
+        that no two disagree. When two legitimate goals conflict, resolve it with an explicit priority \
+        order instead of leaving both rules in. Define any term the executor must interpret.
+        """),
+        (.economy, """
+        Every line earns its place. No theatre: no "world-class expert" personas, no ALL-CAPS, no \
+        threats or bribes, no restating the request back, no padding to reach a length. Calm, direct, \
+        reasoned language performs better on current models.
+        """),
+        (.robustness, """
+        Name the failure policy for the failure classes this task can actually have: missing input, \
+        ambiguous request, and — for work that executes — partial success and out-of-scope asks. Each \
+        gets a stated response, including when to stop and ask. Do not tell a reasoning model to think \
+        step by step; it already reasons — say what to reason about and what to show.
+        """),
+    ]
+
+    /// The principles this target is scored on, numbered from one so the list reads as a list.
+    static func principleBlock(for target: PromptTarget) -> String {
+        let scored = Axis.applicable(to: target)
+        let lines = principles
+            .filter { scored.contains($0.0) }
+            .enumerated()
+            .map { index, pair in "\(index + 1). \(pair.0.title). \(pair.1)" }
+        return """
+        One principle per rubric axis. The critic scores you on exactly these \(lines.count), so a \
+        prompt that satisfies them is a prompt that passes.
+
+        \(lines.joined(separator: "\n\n        "))
+        """
+    }
 
     // MARK: - Shared blocks
 
@@ -230,7 +102,7 @@ enum MetaPrompts {
         return """
         <rubric>
         Score each axis 0-4 against the boundary below. These axes are the only standard; do not
-        invent a thirteenth.
+        invent an axis.
 
         0 = nothing on this axis. 1-2 = something, but generic enough that two readers would build
         different things. 3-4 = the draft clears the boundary; it will survive the writer's edit.
@@ -252,7 +124,7 @@ enum MetaPrompts {
         }.joined(separator: "\n")
         return """
         <rubric>
-        Score each axis 0-4. These anchors are the only standard; do not invent a sixth axis.
+        Score each axis 0-4. These anchors are the only standard; do not invent an axis.
 
         \(body)
         </rubric>
@@ -261,7 +133,8 @@ enum MetaPrompts {
 
     static let defectBlock = """
     <defect_codes>
-    Use these codes for findings. Do not invent codes.
+    Use these codes for findings. Do not invent codes. They are listed worst-first; report
+    findings in this order.
     \(Defect.all.map { "\($0.code) [\($0.severity.rawValue)] \($0.title)" }.joined(separator: "\n"))
     </defect_codes>
     """
@@ -357,43 +230,7 @@ enum MetaPrompts {
         deliverable yourself is the one failure this tool exists to prevent.
 
         <principles>
-        One principle per rubric axis. The critic scores you on exactly these twelve, so a prompt that \
-        satisfies them is a prompt that passes.
-
-        1. Goal. State the outcome and why it matters. A model generalises from a purpose better than \
-        from a rule list, and the purpose is what lets it make the thousand decisions you did not \
-        foresee. Specific enough to steer, general enough to cover cases nobody listed.
-        2. Context. Give only what the model cannot infer, and say why the task exists now. Context the \
-        model can infer is noise that costs attention. Long supplied material goes in tags, before the \
-        instructions that use it.
-        3. Inputs. Name what exists, where it is, and what is missing. Never assume a file, repository, \
-        tool or audience. If there is no input, say so and forbid inventing one.
-        4. Deliverable. Fix the output contract: format, structure, length with a number, language, and \
-        at least one thing it must not contain. An unfixed format is the commonest cause of rework.
-        5. Criteria. Every success criterion must be checkable by someone who did not do the work: a \
-        command, a field, a number, a comparison. "High quality" is not a criterion. Each criterion \
-        names the method the executor actually has.
-        6. Constraints. Say what is out of scope and what the budget is. State what to do, not only what \
-        to avoid: a prohibition without an alternative just moves the failure. When a "never" is \
-        necessary, give the reason and the replacement behaviour.
-        7. Procedure. Order the work, and give each phase a stopping condition — what tells you it is \
-        done. An ordered list with no stopping condition is a wish. Skip this when the task is one step.
-        8. Autonomy. Default to acting. List the action classes that need confirmation first — \
-        destructive, irreversible, visible to others, costly — each with the reason. Never let an \
-        obstacle justify a destructive shortcut.
-        9. Verification. Say how to prove each criterion and what evidence to show. A result nobody \
-        checked is a guess. Verification is part of the task, not an afterthought.
-        10. Consistency. Contradictions are the worst defect. List the rules that constrain the same \
-        action and check that no two disagree. When two legitimate goals conflict, resolve it with an \
-        explicit priority order instead of leaving both rules in. Define any term the executor must \
-        interpret.
-        11. Economy. Every line earns its place. No theatre: no "world-class expert" personas, no \
-        ALL-CAPS, no threats or bribes, no restating the request back. Calm, direct, reasoned language \
-        performs better on current models.
-        12. Robustness. Name the failure policy: missing input, ambiguous request, partial success, \
-        out-of-scope ask. Each gets a stated response, including when to stop and ask. Do not tell a \
-        reasoning model to think step by step; it already reasons — say what to reason about and what \
-        to show.
+        \(principleBlock(for: target))
         </principles>
 
         <facts>
@@ -407,7 +244,8 @@ enum MetaPrompts {
         prices, names, URLs, dates, counts, citations, testimonials, versions, availability. Limits and \
         thresholds you impose on the work itself (word counts, file sizes, timeouts, line budgets) are \
         yours to choose — choose deliberately, state the number, and list each under Assumptions in one \
-        line. Anything a placeholder would leave unusable gets one: {{LIKE THIS}}.
+        line. Use a placeholder, {{LIKE THIS}}, only where the prompt is unusable without the value, \
+        and keep them to a handful — six at most.
         - One canonical example beats ten edge cases. Include one only when a format or style is hard to \
         describe in words, label it as illustrative, and keep it short.
         </facts>
@@ -543,18 +381,17 @@ enum MetaPrompts {
         - Run the contradiction pass explicitly: collect the rules that constrain the same action, then \
         check each pair. Two rules that cannot both be followed are blockers even when each looks sensible \
         alone. Resolve them by naming the priority, not by deleting one.
-        - Run the criteria pass: for each success criterion, ask whether a second person could run it and \
-        get a yes or no. If not, it is a major.
-        - Run the executability pass: for each criterion, name the tool or observation the executor \
-        actually has. A contrast ratio, a benchmark or a "user finds it clear" with no named method is \
-        a major (D18) — the executor will either guess or skip it, and either way the criterion is \
-        decorative.
+        - Run the criteria pass: for each success criterion, ask two things at once — could a second \
+        person run it and get a yes or no, and does the executor have the tool or observation to check \
+        it? A contrast ratio, a benchmark or a "user finds it clear" with no named method fails both. \
+        Report that as ONE issue on the criteria axis (D18), not two: one flaw, one repair.
         - Run the fabrication pass: every number, name, URL, date, count and citation in the prompt is \
         either supplied by the request or listed under Assumptions. Anything asserted as given fact that \
         was not given is a blocker (D17). This is the failure this tool exists to prevent, so check it \
         even when the prompt reads well.
-        - Run the contract pass: does the output contract name format, structure, length, language, and at \
-        least one exclusion?
+        - Run the contract pass: does the output contract pin format, structure, length with a number, \
+        language, and at least one exclusion? A short task may pin fewer; what it pins is not left to \
+        chance.
         - Check the medium: a chat message with autonomy sections is padded; an agent prompt with no \
         verification is under-specified; a system prompt tied to one scenario is not reusable.
         - Check that the prompt instructs rather than performs. If it contains the finished deliverable, \
@@ -567,12 +404,14 @@ enum MetaPrompts {
           "verdict": "ship|repair",
           "summary": "one or two sentences a busy user can act on",
           "issues": [
-            {"axis": "criteria", "severity": "blocker", "quote": "exact text", "problem": "why it fails", "fix": "the replacement text or the change to make"}
+            {"axis": "criteria", "code": "D02", "severity": "blocker", "quote": "exact text", "problem": "why it fails", "fix": "the replacement text or the change to make"}
           ],
           "strengths": ["what is already working, one line each, at most three"],
           "scores": {"goal": {"note": "why", "score": 3}}
         }
         Use "repair" when any issue is a blocker or major. Include a score entry for every axis.
+        Every issue carries the defect code from the list above, so the repair stage knows which
+        rule it is answering.
         """
     }
 
@@ -607,7 +446,9 @@ enum MetaPrompts {
     drop the constraint the user asked for.
     - Resolve a contradiction by choosing the reading that serves the stated objective, and record that \
     choice as one line in the prompt's Assumptions section. Do not add commentary outside the prompt.
-    - Keep the language, the terminology and the user's explicit constraints.
+    - Keep the language, the terminology and the user's explicit constraints. Stay inside the
+    length envelope you are given; if a fix pushes past it, cut something that could be deleted
+    rather than dropping the fix.
     - If an issue cannot be fixed without information you do not have, leave a clearly marked \
     {{PLACEHOLDER}} and add the line to Assumptions. Do not invent a fact.
     </rules>
@@ -615,7 +456,8 @@ enum MetaPrompts {
     Output the full corrected prompt only: no diff, no commentary, no fence around the whole thing.
     """
 
-    static func repairInput(prompt: String, issues: [CritiqueIssue], target: PromptTarget) -> String {
+    static func repairInput(prompt: String, issues: [CritiqueIssue], target: PromptTarget,
+                            draft: String = "", lengthTarget: String = "") -> String {
         let list = issues.enumerated().map { i, issue in
             """
             \(i + 1). [\(issue.severity.rawValue)] \(issue.axis)
@@ -624,19 +466,20 @@ enum MetaPrompts {
                fix: \(issue.fix)
             """
         }.joined(separator: "\n")
-        return """
-        Intended use: \(target.rawValue)
-
-        <issues>
-        \(list)
-        </issues>
-
-        <prompt>
-        \(prompt)
-        </prompt>
-
-        Return the corrected prompt.
-        """
+        var parts = ["Intended use: \(target.rawValue)"]
+        if !lengthTarget.isEmpty {
+            parts.append("Length envelope: \(lengthTarget).")
+        }
+        // Without the original request, a repair cannot tell a fix from a drift: it will happily
+        // delete a constraint because the issue list did not mention it.
+        let trimmedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedDraft.isEmpty {
+            parts.append("<original_request>\n\(trimmedDraft)\n</original_request>")
+        }
+        parts.append("<issues>\n\(list)\n</issues>")
+        parts.append("<prompt>\n\(prompt)\n</prompt>")
+        parts.append("Return the corrected prompt.")
+        return parts.joined(separator: "\n\n")
     }
 
     // MARK: - Stage 5: acceptance tests
@@ -720,174 +563,4 @@ enum MetaPrompts {
         copy the profile into the prompt.
         """
     }
-
-    // MARK: - Output hygiene
-
-    /// Removes <think>…</think> blocks some reasoning models emit inline: an unclosed one mid-stream, and an
-    /// orphan </think> (chat templates that put the opening tag in the prompt, so only the closing tag comes back).
-    static func stripThinking(_ s: String) -> String {
-        var out = s
-        if let close = out.range(of: "</think>"),
-           out.range(of: "<think>", range: out.startIndex..<close.lowerBound) == nil {
-            out.removeSubrange(out.startIndex..<close.upperBound)
-        }
-        while let start = out.range(of: "<think>") {
-            if let end = out.range(of: "</think>", range: start.upperBound..<out.endIndex) {
-                out.removeSubrange(start.lowerBound..<end.upperBound)
-            } else {
-                out.removeSubrange(start.lowerBound..<out.endIndex)
-            }
-        }
-        return out.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Removes one code fence wrapping the *whole* output. Only when the first and last lines are the only
-    /// fence lines, so output that starts and ends with separate code blocks is left alone.
-    static func unfence(_ s: String) -> String {
-        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lines = t.components(separatedBy: "\n")
-        let fences = lines.indices.filter { lines[$0].trimmingCharacters(in: .whitespaces).hasPrefix("```") }
-        guard lines.count >= 3, fences == [0, lines.count - 1],
-              lines[lines.count - 1].trimmingCharacters(in: .whitespaces) == "```" else { return t }
-        return lines[1..<(lines.count - 1)].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    // MARK: - Tolerant JSON
-
-    /// Pulls the first complete JSON object out of a model reply. Models wrap JSON in prose, fences, or
-    /// emit a second object afterwards; a brace counter that respects string literals handles all three.
-    static func jsonObject(from raw: String) -> [String: Any]? {
-        let text = unfence(stripThinking(raw))
-        guard let start = text.firstIndex(of: "{") else { return nil }
-
-        var depth = 0
-        var inString = false
-        var escaped = false
-        var end: String.Index?
-
-        var i = start
-        while i < text.endIndex {
-            let c = text[i]
-            if inString {
-                if escaped { escaped = false }
-                else if c == "\\" { escaped = true }
-                else if c == "\"" { inString = false }
-            } else {
-                if c == "\"" { inString = true }
-                else if c == "{" { depth += 1 }
-                else if c == "}" {
-                    depth -= 1
-                    if depth == 0 { end = i; break }
-                }
-            }
-            i = text.index(after: i)
-        }
-        guard let end else { return nil }
-        let slice = text[start...end]
-        return (try? JSONSerialization.jsonObject(with: Data(slice.utf8))) as? [String: Any]
-    }
-
-    static func parseDiagnosis(_ raw: String) -> Diagnosis {
-        var d = Diagnosis()
-        guard let obj = jsonObject(from: raw) else { return d }
-
-        d.brief = (obj["brief"] as? String) ?? ""
-        d.taskType = (obj["task_type"] as? String) ?? ""
-        d.risk = (obj["risk"] as? String) ?? "low"
-        d.assumptions = (obj["assumptions"] as? [Any] ?? []).compactMap { $0 as? String }
-
-        d.findings = (obj["findings"] as? [Any] ?? []).compactMap { item in
-            guard let f = item as? [String: Any],
-                  let code = f["code"] as? String else { return nil }
-            let sev = Defect.Severity(rawValue: (f["severity"] as? String ?? "minor").lowercased())
-                ?? Defect.severity(for: code)
-            return Finding(code: code.uppercased(),
-                           severity: sev,
-                           quote: (f["quote"] as? String) ?? "",
-                           fix: (f["fix"] as? String) ?? "")
-        }
-
-        d.scores = parseScores(obj["scores"])
-
-        d.questions = (obj["questions"] as? [Any] ?? []).compactMap { item in
-            guard let q = item as? [String: Any],
-                  let text = (q["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !text.isEmpty else { return nil }
-            let options = (q["options"] as? [Any] ?? []).compactMap { opt -> String? in
-                if let s = opt as? String { return s }
-                if let n = opt as? NSNumber { return n.stringValue }
-                return nil
-            }
-            return ClarifyingQuestion(question: text,
-                                      why: q["why"] as? String ?? "",
-                                      options: options,
-                                      default: q["default"] as? String ?? "")
-        }
-        d.questions = Array(d.questions.prefix(4))
-        return d
-    }
-
-    static func parseCritique(_ raw: String) -> Critique? {
-        guard let obj = jsonObject(from: raw) else { return nil }
-        var c = Critique()
-        c.verdict = (obj["verdict"] as? String)?.lowercased() == "repair" ? "repair" : "ship"
-        c.summary = (obj["summary"] as? String) ?? ""
-        c.scores = parseScores(obj["scores"])
-        c.strengths = (obj["strengths"] as? [Any] ?? []).compactMap { $0 as? String }
-
-        c.issues = (obj["issues"] as? [Any] ?? []).compactMap { item in
-            guard let i = item as? [String: Any],
-                  let axis = i["axis"] as? String else { return nil }
-            let sev = Defect.Severity(rawValue: (i["severity"] as? String ?? "minor").lowercased()) ?? .minor
-            return CritiqueIssue(axis: axis.lowercased(),
-                                 severity: sev,
-                                 quote: (i["quote"] as? String) ?? "",
-                                 problem: (i["problem"] as? String) ?? "",
-                                 fix: (i["fix"] as? String) ?? "")
-        }
-        return c
-    }
-
-    static func parseEvalSuite(_ raw: String) -> EvalSuite? {
-        guard let obj = jsonObject(from: raw) else { return nil }
-        var suite = EvalSuite()
-        suite.judgeRubric = (obj["judge_rubric"] as? String) ?? ""
-        suite.cases = (obj["cases"] as? [Any] ?? []).compactMap { item in
-            guard let c = item as? [String: Any],
-                  let name = c["name"] as? String else { return nil }
-            return EvalCase(name: name,
-                            input: (c["input"] as? String) ?? "",
-                            expects: (c["expects"] as? [Any] ?? []).compactMap { $0 as? String },
-                            trap: (c["trap"] as? String) ?? "")
-        }
-        return suite.cases.isEmpty && suite.judgeRubric.isEmpty ? nil : suite
-    }
-
-    /// Accepts both {"goal": {"note": "...", "score": 3}} and {"goal": 3}.
-    private static func parseScores(_ any: Any?) -> [String: AxisVerdict] {
-        guard let dict = any as? [String: Any] else { return [:] }
-        var out: [String: AxisVerdict] = [:]
-        for (key, value) in dict {
-            // Normalise to the canonical axis name, or the score is silently dropped and the axis
-            // falls back to 2 in `total` with nothing on screen to explain it.
-            guard let axis = Axis.match(key) else { continue }
-            if let n = value as? NSNumber {
-                out[axis.rawValue] = AxisVerdict(score: n.intValue, note: "")
-            } else if let d = value as? [String: Any] {
-                let score = (d["score"] as? NSNumber)?.intValue ?? 2
-                out[axis.rawValue] = AxisVerdict(score: score, note: (d["note"] as? String) ?? "")
-            }
-        }
-        return out
-    }
-}
-
-struct ClarifyingQuestion: Identifiable, Hashable {
-    let id = UUID()
-    var question: String
-    var why: String
-    var options: [String]
-    var answer = ""
-    /// The answer the writer will assume if the user skips. Recorded under Assumptions.
-    var `default` = ""
 }

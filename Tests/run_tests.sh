@@ -64,11 +64,11 @@ expect "a gateway that rejects stream_options and reasoning_effort still complet
   -- "$BIN" --e2e "$BASE/strict/v1" --key k --model mock --rigor Standard
 
 # The needle is the assertion. It read "tokens 0 in", which is the bug, not the fix.
-expect "anthropic usage counts input tokens" 0 "tokens 1500 in" \
-  -- "$BIN" --e2e "$BASE/anthropic/v1" --format anthropic --key k --model mock --rigor Fast
+expect "anthropic usage counts cached input too" 0 "tokens 10000 in (2000 cached)" \
+  -- "$BIN" --e2e "$BASE/anthropic/v1" --format anthropic --key k --model mock --rigor Standard
 
-expect "chat-completions usage counts input tokens" 0 "tokens 2100 in" \
-  -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor Fast
+expect "chat-completions usage counts input tokens" 0 "tokens 10500 in" \
+  -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor Standard
 
 expect "a truncated reply fails loudly instead of shipping half a prompt" 2 "cut off" \
   -- "$BIN" --e2e "$BASE/truncate/v1" --key k --model mock --rigor Standard
@@ -79,6 +79,21 @@ expect "an unreachable host reports an error" 2 "" \
 # --e2e drives PromptEngine, so it covers the pipeline and none of the state machine. The probe
 # drives the real view model: a fail() that destroyed the prompt it had just restored passed a
 # fully green suite, because nothing here ever touched it.
+LABELED=$(mktemp -t pi-label)
+cat > "$LABELED" <<'FIXTURE'
+Purpose: You review Go changes for correctness before they merge.
+
+## How you work
+Read the diff, then the tests that cover it. If a test would still pass after the change is
+reverted, say so — that test is not covering the change.
+
+## Output contract
+One comment per finding, Markdown, under 200 words. No praise, no summary of the diff.
+Do not comment on formatting.
+FIXTURE
+expect "a labelled section counts as a section" 0 "All 17 structural checks passed" \
+  -- "$BIN" --lint "$LABELED" --target "System prompt"
+
 expect "the view model keeps the prompt when a refine dies" 0 "vm probe: all green" \
   -- "$BIN" --vm "$BASE/v1" --key k --model mock --rigor Fast
 

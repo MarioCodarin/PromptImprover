@@ -21,6 +21,13 @@ enum E2E {
         /// Dollars per million tokens, taken from the provider's /models pricing block.
         var priceIn: Double?
         var priceOut: Double?
+        /// Reasoning effort, when the endpoint declares one. Without this the 400 fallback for
+        /// `reasoning_effort` was never reachable from the harness.
+        var effort: String?
+        /// Fill every clarifying question with its recorded default, so the gate's "user answered"
+        /// path is exercisable. Without it the harness can only ever simulate a user who skipped
+        /// every question, and `silent-defaults` fires where the app would be clean.
+        var answerQuestions = false
     }
 
     static func parse(_ args: [String]) -> Config? {
@@ -49,6 +56,10 @@ enum E2E {
                 if let v = next() { c.priceIn = Double(v); i += 1 }
             case "--price-out":
                 if let v = next() { c.priceOut = Double(v); i += 1 }
+            case "--effort":
+                if let v = next() { c.effort = v; i += 1 }
+            case "--answer-questions":
+                c.answerQuestions = true
             case "--json":
                 c.json = true
             default: break
@@ -61,7 +72,8 @@ enum E2E {
 
     static func run(_ c: Config) async -> Int32 {
         let endpoint = Endpoint(name: "e2e", baseURL: c.baseURL, format: c.format,
-                                models: [c.model], selectedModel: c.model)
+                                models: [c.model], selectedModel: c.model,
+                                reasoningEffort: c.effort)
         let client = LLMClient(endpoint: endpoint, apiKey: c.key)
         let engine = PromptEngine(client: client, model: c.model, target: c.target,
                                   profile: nil, draft: c.draft)
@@ -94,7 +106,17 @@ enum E2E {
             guard !prompt.isEmpty else { return bail("writer returned nothing") }
             log("write", "\(prompt.split(whereSeparator: \.isWhitespace).count) words")
 
-            let unanswered = diagnosis.questions.filter { $0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+            // Mirrors the app: a question counts as unanswered when the user left it blank. The
+            // harness has no user, so it either skips every question (the default, worst case) or
+            // accepts every recorded default when `--answer-questions` is set.
+            let answered = c.answerQuestions ? diagnosis.questions.map { q -> ClarifyingQuestion in
+                var copy = q
+                copy.answer = q.default
+                return copy
+            } : diagnosis.questions
+            let unanswered = answered.filter {
+                $0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }.count
             var lint = PromptLinter.lint(prompt, target: c.target,
                                          unansweredQuestions: unanswered, draft: c.draft)
             log("lint", "\(lint.score)/100 — \(lint.summary)")
@@ -113,17 +135,21 @@ enum E2E {
                 }
             }
 
-            // Stage 4
-            if c.rigor.repairs, let reviewed = critique, reviewed.needsRepair, !reviewed.issues.isEmpty {
+            // Stage 4. The same policy the app uses, from the same module: the union of the
+            // critic's issues and the gate's blockers/majors, judged by RepairGuard. This used to
+            // be re-implemented here and had drifted.
+            let repairIssues = critique.map { RepairGuard.issues(critique: $0, lint: lint) } ?? []
+            if c.rigor.repairs, !repairIssues.isEmpty {
                 t = Date()
                 var repaired = ""
-                for try await partial in engine.repair(prompt: prompt, issues: reviewed.issues) { repaired = partial }
+                for try await partial in engine.repair(prompt: prompt, issues: repairIssues) { repaired = partial }
                 calls += 1
                 stamp("repair", t)
                 let revised = PromptEngine.finalize(repaired)
                 let after = PromptLinter.lint(revised, target: c.target,
                                               unansweredQuestions: unanswered, draft: c.draft)
-                if !revised.isEmpty, after.score >= lint.score {
+                let verdict = RepairGuard.judge(before: lint, after: after, revised: revised)
+                if verdict.note == nil {
                     prompt = revised
                     lint = after
                     log("repair", "accepted — structure \(after.score)/100")
@@ -137,10 +163,13 @@ enum E2E {
                         stamp("reverify", t)
                         log("reverify", critique.map { "\($0.verdict), rubric \($0.total(for: c.target))/100" } ?? "unparseable")
                     } catch {
-                        log("reverify", "failed (\(error.localizedDescription)) — kept the repaired prompt")
+                        // Losing the re-check is not losing the prompt: keep the text, drop the
+                        // score. The previous critique described the pre-repair text.
+                        critique = nil
+                        log("reverify", "failed (\(error.localizedDescription)) — kept the repaired prompt, dropped the score")
                     }
                 } else {
-                    log("repair", "rejected — \(after.score)/100 < \(lint.score)/100, kept original")
+                    log("repair", "rejected — \(verdict.note ?? "unknown"), kept original")
                 }
             }
 
@@ -160,7 +189,8 @@ enum E2E {
             }
 
             let total = stageTimes.reduce(0) { $0 + $1.1 }
-            let cost = client.usage.cost(inputPerM: c.priceIn, outputPerM: c.priceOut)
+            let cost = client.usage.cost(inputPerM: c.priceIn, outputPerM: c.priceOut,
+                                         readRatio: c.format == .anthropic ? 0.1 : 0.5)
             print("")
             print("── result ─────────────────────────────────────────")
             print("calls \(calls) · \(String(format: "%.1f", total))s · structure \(lint.score)/100"

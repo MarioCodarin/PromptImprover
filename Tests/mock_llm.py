@@ -205,14 +205,32 @@ def classify(system: str, messages: list) -> str:
     return "write"
 
 
-def payload_for(kind: str, attempt: int) -> str:
+# A deliberately damaged repair: no output contract, a contradictory pair of limits, and a
+# shouted instruction. RepairGuard must discard this rather than ship it.
+BAD_REPAIR = """# Make a page
+
+## Objective
+Make the landing page good.
+
+## Context
+It is for developers.
+
+## Requirements
+- Be thorough and make it GREAT.
+
+## Output contract
+Keep it under 200 words and at least 600 words.
+"""
+
+
+def payload_for(kind: str, attempt: int, mode: str = "") -> str:
     if kind == "diagnosis":
         # Wrapped in prose and a fence on purpose: the parser has to cope.
         return "Here is my analysis:\n```json\n" + json.dumps(DIAGNOSIS) + "\n```"
     if kind == "critique":
         return json.dumps(CRITIQUE_REPAIR if attempt == 0 else CRITIQUE_SHIP)
     if kind == "repair":
-        return STRONG_PROMPT
+        return BAD_REPAIR if mode == "revert" else STRONG_PROMPT
     if kind == "tests":
         return json.dumps(TESTS)
     return WEAK_PROMPT if attempt == 0 else STRONG_PROMPT
@@ -223,6 +241,25 @@ class Handler(BaseHTTPRequestHandler):
     attempts = {}
     failures = {}
     rejected = {}
+    last_request = 0.0
+
+    finished_run = False
+
+    def reset_for_run(kind: str) -> None:
+        """A new client run must start from attempt 0, or the fixture silently changes shape.
+
+        The boundary is "a diagnosis arrives after a run that reached a write", not "a diagnosis
+        arrives": the retry mode retries the diagnosis request itself, and resetting there served
+        the scripted 503 forever. A long idle also resets, so a manual re-run against a server
+        left standing behaves like a fresh one.
+        """
+        now = time.time()
+        idle = now - Handler.last_request
+        Handler.last_request = now
+        if (kind == "diagnosis" and Handler.finished_run) or idle > 30.0:
+            Handler.attempts.clear()
+            Handler.failures.clear()
+            Handler.finished_run = False
 
     def log_message(self, *a):  # keep the e2e output readable
         pass
@@ -238,7 +275,7 @@ class Handler(BaseHTTPRequestHandler):
     def route(self):
         parts = self.path.lstrip("/").split("/")
         mode = "normal"
-        if parts and parts[0] in ("truncate", "retry", "nojson", "anthropic", "strict"):
+        if parts and parts[0] in ("truncate", "retry", "nojson", "anthropic", "strict", "revert"):
             mode = parts[0]
             parts = parts[1:]
         return mode, "/" + "/".join(parts)
@@ -258,6 +295,7 @@ class Handler(BaseHTTPRequestHandler):
         # The Anthropic format carries the system prompt as a top-level field, not a message.
         system = req.get("system") or next((m["content"] for m in messages if m.get("role") == "system"), "")
         kind = classify(system, messages)
+        Handler.reset_for_run(kind)
         attempt = self.attempts.get((mode, kind), 0)
 
         # Inject one failure per stage, once, so the client's recovery paths run exactly once.
@@ -275,15 +313,19 @@ class Handler(BaseHTTPRequestHandler):
         if mode == "strict":
             if "stream_options" in req and not self.rejected.get("stream_options"):
                 self.rejected["stream_options"] = True
+                print("MOCK-400 stream_options", flush=True)
                 self._json(400, {"error": {"message": "Unrecognized request argument supplied: stream_options"}})
                 return
             if "reasoning_effort" in req and not self.rejected.get("reasoning_effort"):
                 self.rejected["reasoning_effort"] = True
+                print("MOCK-400 reasoning_effort", flush=True)
                 self._json(400, {"error": {"message": "Unrecognized request argument supplied: reasoning_effort"}})
                 return
 
         self.attempts[(mode, kind)] = attempt + 1
-        text = payload_for(kind, attempt)
+        if kind == "write":
+            Handler.finished_run = True
+        text = payload_for(kind, attempt, mode)
         if mode == "truncate" and kind == "write" and attempt == 0:
             text = text[:60]
 
@@ -306,7 +348,8 @@ class Handler(BaseHTTPRequestHandler):
             # tokens on message_delta. The client has to read both places.
             start = {"type": "message_start",
                      "message": {"usage": {"input_tokens": 1500, "output_tokens": 1,
-                                           "cache_read_input_tokens": 400}}}
+                                           "cache_read_input_tokens": 400,
+                                           "cache_creation_input_tokens": 100}}}
             self.wfile.write(("event: message_start\ndata: " + json.dumps(start) + "\n\n").encode())
             self.wfile.flush()
             done = {"type": "message_delta", "delta": {"stop_reason": stop},

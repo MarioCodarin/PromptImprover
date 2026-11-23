@@ -93,27 +93,27 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
         case .goal:
             return "One or two sentences naming the outcome, who benefits and why it matters. A competent stranger can tell whether the work is on-target."
         case .context:
-            return "Each fact is one the model could not know, and each one changes a decision. Audience, prior decisions and non-obvious definitions are present; general knowledge is not restated."
+            return "Each fact is one the model could not know, and each one changes a decision. Audience, prior decisions and non-obvious definitions are present where they exist; general knowledge is not restated, and an axis with nothing to add says so rather than padding."
         case .inputs:
             return "Every input is named with its location or shape, and the prompt separates what is supplied from what must be retrieved — or the prompt states that none exists and forbids inventing one."
         case .deliverable:
-            return "Format, structure, length, language and tone are pinned, plus at least one explicit exclusion (what not to include)."
+            return "Format, structure, length with a number, language and tone are pinned where they matter, plus at least one explicit exclusion (what not to include). A short task may pin fewer of these; what is pinned is not left to chance."
         case .criteria:
             return "Every criterion is checkable by someone who did not do the work: a command, a field, a threshold, a repeatable comparison."
         case .constraints:
             return "In-scope and out-of-scope are both explicit, prohibitions come with the reason, and any budget is a number."
         case .procedure:
-            return "Phases with an order, a stopping condition per phase, and freedom inside each phase. Says when to skip a phase."
+            return "Phases with an order, a stopping condition per phase, and freedom inside each phase. A one-step task needs no phases at all, and is not penalised for having none."
         case .autonomy:
             return "Default is act; a short list of action classes requires confirmation, each with the reason. Obstacles never justify destructive shortcuts."
         case .verification:
-            return "A named check per success criterion, the evidence to report (command output, field value, source), and what to do when a check fails."
+            return "Each success criterion has a named check, the evidence to report (command output, field value, source), and what to do when a check fails. Missing criteria are charged to `criteria` alone; score verification on whether the checks that do exist are real."
         case .consistency:
-            return "No rule pair conflicts, no term is used two ways, and any tension between speed and thoroughness is resolved by an explicit priority order."
+            return "No rule pair conflicts and no term is used two ways. Where two goals genuinely pull apart, an explicit priority order settles it; where they do not, the prompt does not invent one."
         case .economy:
             return "Reads as instructions from a senior engineer: dense, reasoned, no filler. Removing any line would lose information."
         case .robustness:
-            return "Missing data, ambiguity, partial failure and out-of-scope requests each have a stated response, including when to stop and ask."
+            return "Every failure class this medium can actually have gets a stated response, including when to stop and ask: for an agent run that is missing data, ambiguity, partial failure and out-of-scope requests; for a chat turn it is missing data and ambiguity."
         }
     }
 
@@ -168,16 +168,24 @@ enum Axis: String, CaseIterable, Codable, Identifiable {
     func weight(for target: PromptTarget) -> Int {
         switch (self, target) {
         case (.autonomy, .chat): return 0
-        case (.autonomy, .systemPrompt): return 1
+        // A system prompt that runs unattended needs act-vs-ask settled more than a chat message
+        // does; a chat message needs it not at all.
+        case (.autonomy, .systemPrompt): return 2
         // An unattended agent that touches a filesystem or a shared system needs act-vs-ask
-        // settled more than it needs a tidy output contract.
-        case (.autonomy, .agentTask): return 3
+        // settled more than it needs a tidy output contract, so this outweighs the default 3.
+        case (.autonomy, .agentTask): return 4
         case (.verification, .chat): return 1
         case (.verification, .agentTask): return 3
+        // A system prompt is a standing brief, so its procedure matters less than an agent's.
+        case (.procedure, .systemPrompt): return 1
         case (.procedure, .chat): return 1
+        case (.procedure, .agentTask): return 3
         case (.goal, _): return 3
         case (.deliverable, _): return 3
         case (.criteria, _): return 3
+        // Contradictions are named the worst defect in four separate instructions, and D07 is a
+        // blocker. Weighted below autonomy, the arithmetic contradicted the prose.
+        case (.consistency, .agentTask): return 4
         case (.consistency, _): return 3
         case (.context, _): return 2
         case (.inputs, _): return 2
@@ -205,27 +213,31 @@ struct Defect: Identifiable, Hashable {
     var id: String { code }
 
     /// Ordered worst-first: this is also the order the analyzer is told to report in.
+    /// Ordered worst-first, and the analyzer is told to report in this order. The list is the
+    /// severity order, so anything reading it top-down sees blockers before majors before minors.
     static let all: [Defect] = [
-        // D17 and D18 exist because both live runs shipped defects the taxonomy could not name:
-        // invented specifics, and criteria the executor has no way to check.
-        .init(code: "D17", title: "Asserts a specific the request did not supply (price, name, URL, count)", severity: .blocker),
-        .init(code: "D18", title: "Criterion the executor cannot check with the tools it has", severity: .major),
+        // D17, D18, D19 and D20 exist because live runs shipped defects the taxonomy could not
+        // name: an invented specific, a criterion nobody could check, padding to reach a length
+        // target, and ritual that adds tokens without adding information.
         .init(code: "D01", title: "No objective: the request names an activity, not an outcome", severity: .blocker),
         .init(code: "D02", title: "No success criteria: nothing could fail", severity: .blocker),
         .init(code: "D03", title: "No output contract: format, length or language left to chance", severity: .blocker),
         .init(code: "D07", title: "Contradiction: two rules that cannot both be followed", severity: .blocker),
         .init(code: "D16", title: "Does the task instead of instructing how to do it", severity: .blocker),
-        .init(code: "D04", title: "Missing context the model cannot infer", severity: .major),
+        .init(code: "D17", title: "Asserts a specific the request did not supply (price, name, URL, count)", severity: .blocker),
+        .init(code: "D04", title: "Missing context the model cannot infer, including who reads it", severity: .major),
         .init(code: "D05", title: "Inputs unnamed: no location, shape or owner", severity: .major),
         .init(code: "D06", title: "Unbounded scope: nothing is out of scope", severity: .major),
         .init(code: "D08", title: "Unstated assumption that changes the result", severity: .major),
         .init(code: "D11", title: "No failure policy for missing data or ambiguity", severity: .major),
         .init(code: "D12", title: "No verification: 'check your work' with no check", severity: .major),
         .init(code: "D15", title: "Unsafe autonomy: destructive or outward-facing actions unguarded", severity: .major),
+        .init(code: "D18", title: "Criterion the executor cannot check with the tools it has", severity: .major),
         .init(code: "D09", title: "Vague quantifier: 'some', 'appropriate', 'as needed'", severity: .minor),
         .init(code: "D10", title: "Unbounded effort: 'thorough', 'comprehensive', 'as much as possible'", severity: .minor),
         .init(code: "D13", title: "Filler: persona theatre, shouting, threats, restated obviousness", severity: .minor),
-        .init(code: "D14", title: "Unstated audience", severity: .minor),
+        .init(code: "D19", title: "Padding: lines that exist to reach a length target rather than to inform", severity: .minor),
+        .init(code: "D20", title: "Ritual instruction: 'think step by step' and similar, which changes nothing", severity: .minor),
     ]
 
     static func severity(for code: String) -> Severity {
@@ -234,185 +246,3 @@ struct Defect: Identifiable, Hashable {
 }
 
 /// One thing the analyzer found, with the quote that proves it and the fix that closes it.
-struct Finding: Identifiable, Hashable {
-    var code: String
-    var severity: Defect.Severity
-    var quote: String
-    var fix: String
-
-    var id: String { code + quote }
-
-    /// Resolve a model-supplied axis name to an axis.
-    ///
-    /// Models return "output contract" for `deliverable` and "success criteria" for `criteria`.
-    /// Before this, an unrecognised key silently scored that axis at the generic 2 with no trace,
-    /// so a misnamed axis cost 3-4 points on the 0-100 and nobody could see why.
-    static func match(_ raw: String) -> Axis? {
-        let key = raw.lowercased()
-            .replacingOccurrences(of: " ", with: "_")
-            .replacingOccurrences(of: "-", with: "_")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
-        if let exact = Axis(rawValue: key) { return exact }
-        let aliases: [String: Axis] = [
-            "output_contract": .deliverable, "output_format": .deliverable, "format": .deliverable,
-            "success_criteria": .criteria, "acceptance_criteria": .criteria, "criteria": .criteria,
-            "instruction": .goal, "objective": .goal, "purpose": .goal, "intent": .goal,
-            "background": .context, "situation": .context,
-            "input": .inputs, "materials": .inputs, "resources": .inputs,
-            "scope": .constraints, "boundaries": .constraints, "limits": .constraints,
-            "steps": .procedure, "process": .procedure, "approach": .procedure,
-            "escalation": .autonomy, "confirmation": .autonomy,
-            "verification": .verification, "testing": .verification, "checks": .verification,
-            "contradiction": .consistency, "internal_consistency": .consistency,
-            "concision": .economy, "brevity": .economy, "length": .economy,
-            "edge_cases": .robustness, "failure_handling": .robustness, "errors": .robustness,
-        ]
-        return aliases[key]
-    }
-
-    var title: String { Defect.all.first { $0.code == code }?.title ?? "Defect \(code)" }
-}
-
-/// Per-axis verdict. `note` is the justification; it comes before the number in the JSON on purpose.
-struct AxisVerdict: Codable, Hashable {
-    var score: Int
-    var note: String
-}
-
-struct Diagnosis {
-    var brief = ""
-    var taskType = ""
-    var risk = "low"
-    var findings: [Finding] = []
-    var scores: [String: AxisVerdict] = [:]
-    var assumptions: [String] = []
-    var questions: [ClarifyingQuestion] = []
-
-    /// Axes the model returned nothing for. They score the generic 2, so the caller can say which
-    /// ones were assumed rather than judged.
-    func missingAxes(for target: PromptTarget) -> [Axis] {
-        Axis.applicable(to: target).filter { scores[$0.rawValue] == nil }
-    }
-
-    /// Weighted 0–100. A missing axis scores 2 (the "generic" anchor); `missingAxes` names them.
-    func total(for target: PromptTarget) -> Int {
-        let axes = Axis.applicable(to: target)
-        let weight = axes.reduce(0) { $0 + $1.weight(for: target) }
-        guard weight > 0 else { return 0 }
-        let sum = axes.reduce(0.0) { acc, axis in
-            let raw = scores[axis.rawValue]?.score ?? 2
-            return acc + Double(max(0, min(4, raw))) * Double(axis.weight(for: target))
-        }
-        return Int((sum / (Double(weight) * 4.0) * 100).rounded())
-    }
-
-    var blockers: [Finding] { findings.filter { $0.severity == .blocker } }
-}
-
-/// One problem the critic found in a written prompt. Distinct from `Finding` because the critic
-/// judges a prompt that already exists and must quote it exactly.
-struct CritiqueIssue: Identifiable, Hashable {
-    var axis: String
-    var severity: Defect.Severity
-    var quote: String
-    var problem: String
-    var fix: String
-
-    var id: String { axis + quote + problem }
-}
-
-struct Critique {
-    var verdict = "ship"          // "ship" | "repair"
-    var summary = ""
-    var scores: [String: AxisVerdict] = [:]
-    var issues: [CritiqueIssue] = []
-    var strengths: [String] = []
-
-    var needsRepair: Bool {
-        verdict == "repair" || issues.contains { $0.severity != .minor }
-    }
-
-    func total(for target: PromptTarget) -> Int {
-        Diagnosis(scores: scores).total(for: target)
-    }
-
-    func missingAxes(for target: PromptTarget) -> [Axis] {
-        Diagnosis(scores: scores).missingAxes(for: target)
-    }
-}
-
-/// A single acceptance test for the generated prompt: something the user can paste in to check
-/// whether the prompt actually works, before shipping it.
-struct EvalCase: Identifiable, Hashable {
-    var name: String
-    var input: String
-    var expects: [String]
-    var trap: String
-
-    var id: String { name + input }
-}
-
-struct EvalSuite {
-    var cases: [EvalCase] = []
-    var judgeRubric = ""
-
-    var markdown: String {
-        guard !cases.isEmpty else { return judgeRubric }
-        var out = ["## Acceptance tests", ""]
-        out.append("Run each input through the prompt. A pass means every expectation holds.")
-        out.append("")
-        for (i, c) in cases.enumerated() {
-            out.append("### \(i + 1). \(c.name)")
-            out.append("")
-            out.append("**Input**")
-            out.append("")
-            out.append("```text")
-            out.append(c.input)
-            out.append("```")
-            out.append("")
-            out.append("**Passes when**")
-            for e in c.expects { out.append("- \(e)") }
-            if !c.trap.isEmpty {
-                out.append("")
-                out.append("*Why a weak prompt fails this:* \(c.trap)")
-            }
-            out.append("")
-        }
-        if !judgeRubric.isEmpty {
-            out.append("## Judging")
-            out.append("")
-            out.append(judgeRubric)
-        }
-        return out.joined(separator: "\n")
-    }
-}
-
-/// How many model calls the pipeline is allowed to spend, and what it does with them.
-enum Rigor: String, CaseIterable, Identifiable, Codable {
-    case fast = "Fast"
-    case standard = "Standard"
-    case deep = "Deep"
-
-    var id: String { rawValue }
-
-    var blurb: String {
-        switch self {
-        case .fast: return "Write only. One call. For throwaway prompts."
-        case .standard: return "Diagnose, write, verify against the rubric, repair real defects. Three to four calls."
-        case .deep: return "Standard plus a second verification pass and an acceptance-test suite. Five to six calls."
-        }
-    }
-
-    /// Stage names for the progress row, so the panel says what is happening rather than "working".
-    var stages: [String] {
-        switch self {
-        case .fast: return ["Write", "Lint"]
-        case .standard: return ["Diagnose", "Write", "Lint", "Verify", "Repair"]
-        case .deep: return ["Diagnose", "Write", "Lint", "Verify", "Repair", "Tests"]
-        }
-    }
-
-    var verifies: Bool { self != .fast }
-    var repairs: Bool { self != .fast }
-    var writesTests: Bool { self == .deep }
-}

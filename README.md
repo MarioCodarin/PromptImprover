@@ -10,7 +10,7 @@ Write what you want in a few words. The app reads it, asks a few short questions
 - **Five stages, one gate.**
   1. *Diagnose* — scores the draft 0–4 on a fixed 12-axis rubric, lists defects by code (`D02` = no success criteria), and asks up to 4 questions — only when no defensible default exists. Zero questions is normal.
   2. *Write* — compiles the brief into an executable prompt, streaming as it goes.
-  3. *Lint* — 19 deterministic structural checks, offline and free: missing sections, unmeasurable criteria, two output formats at once, two different length limits, chat preamble, code fences, shouted rules, unanswered questions with no assumptions recorded.
+  3. *Lint* — 19 deterministic structural checks for an agent task, 17 for a system prompt, 15 for a chat message, offline and free: missing sections, unmeasurable criteria, two output formats at once, two different length limits, chat preamble, code fences, shouted rules, unanswered questions with no assumptions recorded.
   4. *Verify* — an independent reviewer, given the same rubric the writer was given, quotes every defect it finds and scores the result. Anything blocker or major triggers a repair pass; a repair that scores worse structurally than the original is discarded. The repaired prompt is re-scored once, so the number you see describes the text you copy.
   5. *Tests* (Deep) — 3–5 acceptance cases, each one something a weak prompt fails, plus a checklist for judging the output.
 - **Three depths.** Fast = one call, write only. Standard = diagnose, write, lint, verify, repair, re-score. Deep = adds acceptance tests. The lint gate runs in every mode.
@@ -111,19 +111,24 @@ Sources/PromptImprover/
 ├── SettingsView.swift        General (depth) · Profile · Endpoints · Feedback tabs
 ├── ImproverViewModel.swift   Stage orchestration, questions, cancellation via run IDs, repair regression guard
 ├── PromptEngine.swift        The five stages as network calls: diagnose/write/verify/repair/tests/revise
-├── Rubric.swift              Axis + anchors, defect taxonomy, Diagnosis/Critique/EvalSuite, Rigor
-├── PromptLinter.swift        19 deterministic structural checks, 0–100 score, severity-ranked issues
-├── MetaPrompts.swift         Every meta-prompt, the brief composer, output hygiene, tolerant JSON parsing
+├── Rubric.swift              The standard: 12 axes with 0/2/4 anchors, target weights, defect taxonomy
+├── PipelineModel.swift       What flows between stages: Finding, Diagnosis, Critique, EvalSuite, Rigor
+├── PromptTarget.swift        The three targets: skeleton, guidance, length aim, few-shot exemplar
+├── PromptLinter.swift        Lint entry point, report, issue→axis mapping, shared text helpers
+├── LinterChecks.swift        The 15 structural checks, one function each, over one LintContext
+├── MetaPrompts.swift         Every meta-prompt and the brief composer
+├── ResponseParsing.swift     Tolerant JSON extraction, reasoning-block stripping, fence removal
+├── RepairGuard.swift         Whether a repair is kept: what changed, not what it scored
 ├── LLMClient.swift           Both wire formats, SSE streaming, retry with backoff, parameter fallback, truncation detection
 ├── Endpoints.swift           Endpoint model, presets, EndpointStore, Keychain wrapper
 ├── Profile.swift             UserProfile, feedback tags, learned preferences
-├── SelfTest.swift            80 offline checks + --lint / --dump-prompts
+├── SelfTest.swift            97 offline checks + --lint / --dump-prompts
 ├── E2E.swift                 Headless pipeline run with a stage trace (--e2e)
 ├── VMProbe.swift             Headless driver for the view model: restore, cancel, depth (--vm)
 ├── LoginItem.swift           SMAppService open-at-login
 └── Logo.swift                LogoMark (SwiftUI) + .icns renderer
 Tests/
-├── mock_llm.py               Mock provider: SSE, both wire formats, and four failure modes
+├── mock_llm.py               Mock provider: SSE, both wire formats, five failure modes, deterministic per run
 └── run_tests.sh              The whole gate: self-tests + every pipeline path
 build.sh                      SwiftPM build → self-test → .app bundle (LSUIElement, icon, ad-hoc codesign)
 ```
@@ -131,7 +136,7 @@ build.sh                      SwiftPM build → self-test → .app bundle (LSUIE
 ## Verifying it
 
 ```sh
-./Tests/run_tests.sh      # 51 offline checks + 8 end-to-end runs against a mock provider
+./Tests/run_tests.sh      # 97 offline checks + 14 end-to-end runs against a mock provider
 ./build.sh                # runs the self-test before bundling; a regression in the prompts fails the build
 ```
 
@@ -145,7 +150,9 @@ Three commands for working on the prompts themselves:
     --price-in 1 --price-out 2
 ```
 
-`--lint` takes `--target` because the required sections differ per target: a chat message is prose and has no headings, so it is matched against the body rather than at headings. It takes `--unanswered N` for the same reason the app passes it.
+`--lint` takes `--target` because the required sections differ per target: a chat message is prose and has no headings, so it is matched against the body rather than at headings. It takes `--unanswered N` for the same reason the app passes it. A section counts as present when it appears as a heading, as a labelled line (`Purpose: …`), or — for a chat message — anywhere in the body; and a section may be explicitly declined (`Context: none; the task is self-contained`), because the writer is told to drop sections that would be empty and the gate has to agree with that instruction.
+
+`--e2e` takes `--answer-questions` to fill each clarifying question with its recorded default. Without it the harness can only simulate a user who skipped every question, which makes `silent-defaults` fire where the app would be clean. `--effort` sets a reasoning effort so the 400 fallback for that parameter is reachable.
 
 `--vm` covers the half `--e2e` cannot reach. It drives the real `ImproverViewModel` — the same object the window binds to — and asserts the invariants that only exist in the state machine: a refine that dies restores the prompt it replaced instead of destroying it, a cancel mid-write ships no fragment, and a depth change mid-run does not reshape a pipeline already in flight. Those three were all broken at once, and a fully green `--e2e` suite could not see any of them.
 
@@ -165,5 +172,7 @@ The mock is hostile on purpose: it wraps its JSON in prose and fences, answers t
 - A cancelled `AsyncThrowingStream` finishes **without throwing**. Every async task in the view model checks its `runID` before writing state, so a stopped run can never overwrite a newer one.
 - `ImproverViewModel` owns interaction; `PromptEngine` owns model calls. Keep it that way: anything that touches the network belongs in the engine, or `--e2e` stops covering it.
 - The linter only contains checks where a string test is *sound*. Semantic contradictions are left to the critic on purpose — a word-overlap heuristic flags "always run the tests" against "never commit without running tests" and calls agreement a conflict.
-- `Rigor.fast` skips the diagnosis stage entirely, so `askQuestions` has no effect there. That is the definition of Fast, not a bug.
+- `Rigor.fast` skips the diagnosis stage entirely. `askQuestions` never skips it: the toggle controls whether the run *stops* for answers, not whether stage 1 happens, because the analyzer's output is the writer's defect list, task type and risk.
+- A repair is judged on **what changed**, not on the weighted score. Only blockers and majors can veto a repair; minors never do, because the critic re-scores the shipped text anyway. `RepairGuard` is the single home for that policy, and both the app and `--e2e` call it — they had drifted apart when the policy lived in two places.
+- The linter's issue→axis table is keyed on the ids the checks actually emit. It has been wrong twice (once on a registry label, once on single-word section names while the sections are `"output contract"` and `"success criteria"`), and both times every section blocker reported `consistency`, so a repair was sent looking for a contradiction. A self-test builds the id list from `requiredSections` so renaming a section cannot unmoor its axis.
 - When you change a prompt, run `--dump-prompts` before and after and read the diff. Prompt edits are code changes; they get reviewed like code changes.

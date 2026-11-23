@@ -20,7 +20,7 @@ struct PromptEngine {
                                             messages: [.user(MetaPrompts.analyzerInput(draft, target: target))],
                                             model: model,
                                             options: .json())
-        return MetaPrompts.parseDiagnosis(raw)
+        return ResponseParsing.parseDiagnosis(raw)
     }
 
     /// Stage 2. Yields the accumulated text after every chunk, so a cancelled run still has a prefix.
@@ -35,13 +35,15 @@ struct PromptEngine {
                                             messages: [.user(MetaPrompts.criticInput(prompt: prompt, draft: draft, target: target))],
                                             model: model,
                                             options: .json())
-        return MetaPrompts.parseCritique(raw)
+        return ResponseParsing.parseCritique(raw)
     }
 
     /// Stage 4. Streams like the writer, so a long repair is visible instead of a spinner.
     func repair(prompt: String, issues: [CritiqueIssue]) -> AsyncThrowingStream<String, Error> {
         stream(system: MetaPrompts.repair,
-               messages: [.user(MetaPrompts.repairInput(prompt: prompt, issues: issues, target: target))],
+               messages: [.user(MetaPrompts.repairInput(prompt: prompt, issues: issues, target: target,
+                                                        draft: draft,
+                                                        lengthTarget: target.lengthTarget))],
                model: model)
     }
 
@@ -51,7 +53,7 @@ struct PromptEngine {
                                             messages: [.user(MetaPrompts.evalInput(prompt: prompt, target: target))],
                                             model: model,
                                             options: .json())
-        return MetaPrompts.parseEvalSuite(raw)
+        return ResponseParsing.parseEvalSuite(raw)
     }
 
     /// Refine: a revision of the whole prompt with the conversation so far as context.
@@ -70,7 +72,7 @@ struct PromptEngine {
                     for try await chunk in client.stream(system: base, messages: messages, model: model) {
                         if Task.isCancelled { break }
                         raw += chunk
-                        continuation.yield(MetaPrompts.stripThinking(raw))
+                        continuation.yield(ResponseParsing.stripThinking(raw))
                     }
                     continuation.finish()
                 } catch {
@@ -82,7 +84,7 @@ struct PromptEngine {
     }
 
     /// Final form of a streamed reply: thinking stripped, one wrapper fence removed, trimmed.
-    static func finalize(_ raw: String) -> String {
-        MetaPrompts.unfence(MetaPrompts.stripThinking(raw))
-    }
+    /// Output hygiene belongs to `ResponseParsing`; kept as a named step because "finalise what
+    /// the model produced" is a pipeline concept, not a parsing detail.
+    static func finalize(_ raw: String) -> String { ResponseParsing.finalize(raw) }
 }

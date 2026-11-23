@@ -62,7 +62,10 @@ struct QualityPanel: View {
     private var scores: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let c = vm.critique {
-                ScoreRow(label: "Rubric", value: c.total(for: vm.runTarget), suffix: "/100")
+                // Labelled as a rubric score, not a quality percentage: the two 0-100 numbers on
+                // this panel come from different instruments and one blocker costs each of them a
+                // different amount.
+                ScoreRow(label: "Rubric", value: c.total(for: vm.runTarget), suffix: "/100 weighted")
                 // A missing axis silently scores the generic 2, so the number above is part
                 // assumption. Naming them is the difference between a score and a guess.
                 let absent = c.missingAxes(for: vm.runTarget)
@@ -108,7 +111,11 @@ struct QualityPanel: View {
     private var repairNote: String? {
         switch vm.repairOutcome {
         case .applied: return "One repair pass was applied. What is listed above survived it — refine if you want it changed."
-        case .reverted: return "A repair was attempted and discarded because it scored worse structurally than the original."
+        case .reverted:
+            // Name the reason: "discarded" alone leaves the user unable to tell a model failure
+            // from the guard working correctly.
+            let why = vm.repairNote.map { " \($0.prefix(1).uppercased())\($0.dropFirst())." } ?? ""
+            return "A repair was attempted and discarded.\(why) The prompt below is the pre-repair text."
         case .none: return nil
         }
     }

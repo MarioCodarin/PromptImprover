@@ -71,6 +71,9 @@ final class ImproverViewModel: ObservableObject {
         case none, applied, reverted
     }
 
+    /// Why a repair was discarded, for the panel. Nil when nothing was discarded.
+    @Published var repairNote: String?
+
     static let rigorKey = "improver.rigor"
 
     init() {
@@ -95,7 +98,10 @@ final class ImproverViewModel: ObservableObject {
     /// waits for the user to answer questions. `isBusy` excludes `.answering` by design, so it is
     /// the wrong test for "may a background task write here".
     var ownsErrorBanner: Bool {
-        phase != .idle && phase != .done || task != nil
+        // A run owns the banner from its first stage until it finishes. `task != nil` used to be
+        // part of this and never went false, because `task` is never cleared — so after one run a
+        // failed model refresh was silently dropped for the rest of the session.
+        phase != .idle && phase != .done
     }
     var canRefine: Bool { phase == .done && !output.isEmpty }
 
@@ -134,7 +140,10 @@ final class ImproverViewModel: ObservableObject {
         tokensIn = 0; tokensOut = 0
         startedAt = Date(); elapsed = 0
 
-        guard runRigor.verifies, askQuestions else { runWriter(); return }
+        // `askQuestions` controls whether the run stops for answers, not whether stage 1 happens:
+        // the analyzer's output is the writer's defect list, task type and risk, and losing it made
+        // the same draft produce a different prompt depending on one checkbox.
+        guard runRigor.verifies else { runWriter(); return }
         analyze()
     }
 
@@ -152,7 +161,7 @@ final class ImproverViewModel: ObservableObject {
                 diagnosis = d
                 analysis = render(d)
                 questions = d.questions
-                if d.questions.isEmpty { runWriter() } else { phase = .answering }
+                if d.questions.isEmpty || !askQuestions { runWriter() } else { phase = .answering }
             } catch { fail(error, run: run) }
         }
     }
@@ -204,7 +213,7 @@ final class ImproverViewModel: ObservableObject {
     private func afterWrite(run: Int) {
         guard run == runID else { return }
         lint = PromptLinter.lint(output, target: runTarget, unansweredQuestions: unansweredCount(), draft: draft)
-        guard runRigor.verifies else { finish(); return }
+        guard runRigor.verifies else { finish(run: runID); return }
         verify()
     }
 
@@ -221,19 +230,21 @@ final class ImproverViewModel: ObservableObject {
                 calls += 1
                 guard let c else { nextAfterVerify(); return }
                 critique = c
-                // No quoted issues means nothing to fix: an empty repair pass costs a call and a
-                // re-check and returns the prompt unchanged.
-                if c.needsRepair, !c.issues.isEmpty { repair(c) } else { nextAfterVerify() }
+                // Repair is driven by what the critic found *and* what the gate found. They measure
+                // different things, and only the gate is deterministic: a prompt the linter rejects
+                // must not ship because the critic said "ship".
+                let issues = RepairGuard.issues(critique: c, lint: lint)
+                if issues.isEmpty { nextAfterVerify() } else { repair(issues) }
             } catch { fail(error, run: run) }
         }
     }
 
     private func nextAfterVerify() {
-        if runRigor.writesTests { writeTests() } else { finish() }
+        if runRigor.writesTests { writeTests() } else { finish(run: runID) }
     }
 
     /// Stage 4. Only the issues the critic could quote, and only when one is worth fixing.
-    private func repair(_ c: Critique) {
+    private func repair(_ issues: [CritiqueIssue]) {
         guard let engine else { return }
         task?.cancel()
         runID += 1
@@ -246,7 +257,7 @@ final class ImproverViewModel: ObservableObject {
         task = Task {
             do {
                 var last = ""
-                for try await partial in engine.repair(prompt: before, issues: c.issues) {
+                for try await partial in engine.repair(prompt: before, issues: issues) {
                     guard run == runID else { return }
                     last = partial
                     output = partial
@@ -254,19 +265,23 @@ final class ImproverViewModel: ObservableObject {
                 guard run == runID, !Task.isCancelled else { return }
                 calls += 1
                 let revised = PromptEngine.finalize(last)
-                // A repair that scores worse structurally is a regression: keep the original.
+                // Judged on what changed, not on the weighted score: a repair that closes a
+                // contradiction the linter cannot see must survive a minor it introduces.
                 let beforeReport = PromptLinter.lint(before, target: runTarget,
                                                      unansweredQuestions: unansweredCount(), draft: draft)
                 let afterReport = PromptLinter.lint(revised, target: runTarget,
                                                     unansweredQuestions: unansweredCount(), draft: draft)
-                if revised.isEmpty || afterReport.score < beforeReport.score {
+                let verdict = RepairGuard.judge(before: beforeReport, after: afterReport, revised: revised)
+                if let why = verdict.note {
                     output = before
                     lint = beforeReport
                     repairOutcome = .reverted
+                    repairNote = why
                     lastGood = nil
                     nextAfterVerify()
                 } else {
                     repairOutcome = .applied
+                    repairNote = nil
                     output = revised
                     lint = afterReport
                     lastGood = nil
@@ -290,7 +305,10 @@ final class ImproverViewModel: ObservableObject {
                 let c = try await engine.verify(prompt: repaired)
                 guard run == runID, !Task.isCancelled else { return }
                 calls += 1
-                if let c, output == repaired { critique = c }
+                // The re-check scores `repaired`. If it produced no critique, or the text moved on
+                // under it, there is no score for what is on screen — the previous critique
+                // described the pre-repair text and must not survive.
+                critique = output == repaired ? c : nil
                 nextAfterVerify()
             } catch {
                 // Losing the re-check is not losing the prompt: keep the repaired text, drop the stale score.
@@ -303,7 +321,7 @@ final class ImproverViewModel: ObservableObject {
 
     /// Stage 5 (deep only). Tests the user can run before trusting the prompt.
     private func writeTests() {
-        guard let engine else { finish(); return }
+        guard let engine else { finish(run: runID); return }
         phase = .testing
         let run = runID
 
@@ -313,17 +331,19 @@ final class ImproverViewModel: ObservableObject {
                 guard run == runID, !Task.isCancelled else { return }
                 calls += 1
                 evalSuite = suite
-                finish()
+                finish(run: run)
             } catch {
                 // Tests are a bonus. Losing them must not lose the prompt.
                 guard run == runID else { return }
                 evalSuite = nil
-                finish()
+                finish(run: run)
             }
         }
     }
 
-    private func finish() {
+    private func finish(run: Int) {
+        // The invariant belongs to the write, not to the discipline of nine call sites.
+        guard run == runID else { return }
         lastGood = nil
         elapsed = Date().timeIntervalSince(startedAt)
         if let usage = client?.usage {
@@ -366,7 +386,7 @@ final class ImproverViewModel: ObservableObject {
                 critique = nil
                 evalSuite = nil
                 repairOutcome = .none
-                finish()
+                finish(run: run)
             } catch { fail(error, run: run) }
         }
     }
@@ -394,23 +414,36 @@ final class ImproverViewModel: ObservableObject {
     }
 
     func rate(positive: Bool, tags: [String], profile: ProfileStore) {
-        profile.record(positive: positive, tags: tags, target: target)
+        // `runTarget`, not `target`: the menu can change mid-run, and a prompt written for an
+        // agent task must not be filed as a chat message.
+        profile.record(positive: positive, tags: tags, target: runTarget)
         rated = positive
     }
 
     func copyOutput() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(output, forType: .string)
-        copied = true
-        Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+        flashCopied()
     }
 
     func copyTests() {
         guard let suite = evalSuite else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(suite.markdown, forType: .string)
+        flashCopied()
+    }
+
+    /// Shows the copy confirmation for a moment, then clears it.
+    ///
+    /// The clear is unconditional. Guarding it on `runID` looked tidier and made the clear
+    /// unreachable: `runID` moves on every start, refine, repair and cancel, so a copy taken
+    /// shortly before one of those left the badge showing "Copied" for the rest of the session.
+    private func flashCopied() {
         copied = true
-        Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            self?.copied = false
+        }
     }
 
     /// Errors raised outside a run (model list refresh) must not overwrite a run's own error banner,

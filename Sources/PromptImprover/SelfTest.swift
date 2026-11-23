@@ -43,18 +43,18 @@ enum SelfTest {
         {"verdict": "ship", "summary": "fine"}
         ```
         """
-        check("json: fenced object", MetaPrompts.jsonObject(from: fenced)?["summary"] as? String == "fine")
+        check("json: fenced object", ResponseParsing.jsonObject(from: fenced)?["summary"] as? String == "fine")
 
         let chatty = """
         Sure! Here is my analysis:
         {"a": 1, "b": {"c": "}"}}
         and some trailing prose {"x": 9}
         """
-        let chattyObj = MetaPrompts.jsonObject(from: chatty)
+        let chattyObj = ResponseParsing.jsonObject(from: chatty)
         check("json: brace inside a string does not end the object", chattyObj?["a"] as? Int == 1)
         check("json: trailing object ignored", chattyObj?["x"] == nil)
 
-        check("json: no object returns nil", MetaPrompts.jsonObject(from: "no json here") == nil)
+        check("json: no object returns nil", ResponseParsing.jsonObject(from: "no json here") == nil)
 
         // MARK: Parsers
 
@@ -66,7 +66,7 @@ enum SelfTest {
          "questions": [{"question": "Who is the page for?", "why": "changes tone", "options": ["devs", "clients"], "default": "clients"}],
          "assumptions": ["Assume a marketing page"]}
         """
-        let d = MetaPrompts.parseDiagnosis(diagnosisJSON)
+        let d = ResponseParsing.parseDiagnosis(diagnosisJSON)
         check("parse: brief", d.brief == "Wants a landing page.")
         check("parse: risk", d.risk == "medium")
         check("parse: finding severity", d.findings.first?.severity == .blocker)
@@ -75,7 +75,7 @@ enum SelfTest {
         check("parse: question default", d.questions.first?.default == "clients")
         check("parse: assumption", d.assumptions.first == "Assume a marketing page")
 
-        let badCode = MetaPrompts.parseDiagnosis(#"{"findings":[{"code":"D99","severity":"wat","quote":"x","fix":"y"}]}"#)
+        let badCode = ResponseParsing.parseDiagnosis(#"{"findings":[{"code":"D99","severity":"wat","quote":"x","fix":"y"}]}"#)
         check("parse: unknown code falls back to taxonomy severity", badCode.findings.first?.severity == .minor)
 
         let critiqueJSON = """
@@ -84,7 +84,7 @@ enum SelfTest {
          "strengths": ["clear objective"],
          "scores": {"criteria": {"note": "adjective", "score": 1}}}
         """
-        let c = MetaPrompts.parseCritique(critiqueJSON)
+        let c = ResponseParsing.parseCritique(critiqueJSON)
         check("parse: critique verdict", c?.verdict == "repair")
         check("parse: critique needs repair", c?.needsRepair == true)
         check("parse: critique issue axis", c?.issues.first?.axis == "criteria")
@@ -94,20 +94,20 @@ enum SelfTest {
         {"cases":[{"name":"Empty input","input":"","expects":["asks for the missing field"],"trap":"invents data"}],
          "judge_rubric":"1. Every claim has a source."}
         """
-        let suite = MetaPrompts.parseEvalSuite(suiteJSON)
+        let suite = ResponseParsing.parseEvalSuite(suiteJSON)
         check("parse: eval case", suite?.cases.first?.name == "Empty input")
         check("parse: eval markdown renders", suite?.markdown.contains("Acceptance tests") == true)
 
         // MARK: Output hygiene
 
         check("unfence: strips one wrapper",
-              MetaPrompts.unfence("```markdown\n# A\nbody\n```") == "# A\nbody")
+              ResponseParsing.unfence("```markdown\n# A\nbody\n```") == "# A\nbody")
         check("unfence: leaves two blocks alone",
-              MetaPrompts.unfence("```\na\n```\n```\nb\n```").contains("```"))
+              ResponseParsing.unfence("```\na\n```\n```\nb\n```").contains("```"))
         check("thinking: orphan closing tag stripped",
-              MetaPrompts.stripThinking("</think>\n# Prompt") == "# Prompt")
+              ResponseParsing.stripThinking("</think>\n# Prompt") == "# Prompt")
         check("thinking: unclosed block stripped to empty",
-              MetaPrompts.stripThinking("<think>musing forever") == "")
+              ResponseParsing.stripThinking("<think>musing forever") == "")
 
         // MARK: Brief composer
 
@@ -294,6 +294,14 @@ enum SelfTest {
         check("linter: a prose assumption clause is read", !r5s.issues.contains { $0.id == "silent-defaults" },
               r5s.issues.map(\.id).joined(separator: ","))
 
+        // A label is usually bolded. Requiring a bare word failed the natural way of writing it.
+        let boldAssumptions = syntheticPrompt(.chat)
+            + "\n**Assumptions:** internal draft, not a launch; signup is non-functional by design.\n"
+        let r5bold = PromptLinter.lint(boldAssumptions, target: .chat, unansweredQuestions: 4)
+        check("linter: a bolded Assumptions label counts",
+              !r5bold.issues.contains { $0.id == "silent-defaults" },
+              r5bold.issues.map(\.id).joined(separator: ","))
+
         // One decision can answer two questions; a string test cannot map questions to decisions,
         // so presence is the sound property. Absence still fails.
         let noAssumptions = syntheticPrompt(.chat)
@@ -304,13 +312,112 @@ enum SelfTest {
 
         // The model names axes in its own words; a near-miss must still score, not silently
         // fall back to the generic 2.
-        let aliased = MetaPrompts.parseDiagnosis(#"{"scores":{"output contract":{"note":"vague","score":1},"success criteria":{"score":3},"goal":2}}"#)
+        let aliased = ResponseParsing.parseDiagnosis(#"{"scores":{"output contract":{"note":"vague","score":1},"success criteria":{"score":3},"goal":2}}"#)
         check("parse: axis names are aliased to canonical",
               aliased.scores["deliverable"]?.score == 1 && aliased.scores["criteria"]?.score == 3
                 && aliased.scores["goal"]?.score == 2,
               aliased.scores.keys.sorted().joined(separator: ","))
         check("parse: an unmatchable axis is not invented",
               aliased.scores["output_contract"] == nil)
+
+        // The repair guard decides whether the user keeps the repaired prompt. It used to
+        // compare weighted scores, which discarded repairs that fixed what they were asked to
+        // fix. Pure function, so every branch is testable here.
+        func report(_ spec: [(PromptLinter.Issue.Severity, String)]) -> PromptLinter.Report {
+            var r = PromptLinter.Report()
+            r.checksRun = 19
+            r.issues = spec.map { PromptLinter.Issue(id: $0.1, severity: $0.0,
+                                                     title: $0.1, detail: "", fix: "") }
+            return r
+        }
+        let clean = report([])
+        let minorAfter = report([(.minor, "shouting")])
+        let majorAfter = report([(.major, "vague-criteria")])
+        let blockerAfter = report([(.blocker, "section:output")])
+        let oneBlocker = report([(.blocker, "section:output")])
+        let twoMajors = report([(.major, "vague-criteria"), (.major, "section:context")])
+        let oneMajorTwoMinors = report([(.major, "vague-criteria"), (.minor, "shouting"),
+                                        (.minor, "too-thin")])
+        let threeMajors = report([(.major, "a"), (.major, "b"), (.major, "c")])
+
+        // The bug this replaced: a repair that fixed something invisible to the linter and added
+        // two words past a ceiling scored 97 < 100 and was thrown away.
+        check("repair guard: a minor does not veto a repair",
+              RepairGuard.judge(before: clean, after: minorAfter, revised: "text") == .accept)
+        check("repair guard: a clean prompt made unclean is kept",
+              RepairGuard.judge(before: clean, after: majorAfter, revised: "text")
+                == .revert(.brokeClean))
+        check("repair guard: a new blocker is discarded",
+              RepairGuard.judge(before: clean, after: blockerAfter, revised: "text")
+                == .revert(.gainedBlocker))
+        check("repair guard: closing a blocker survives new minors",
+              RepairGuard.judge(before: oneBlocker, after: minorAfter, revised: "text") == .accept)
+        check("repair guard: fixing one major and adding two minors is progress",
+              RepairGuard.judge(before: twoMajors, after: oneMajorTwoMinors, revised: "text") == .accept)
+        check("repair guard: more majors than before is not progress",
+              RepairGuard.judge(before: twoMajors, after: threeMajors, revised: "text")
+                == .revert(.gainedMajor))
+        check("repair guard: an empty repair is discarded",
+              RepairGuard.judge(before: clean, after: clean, revised: "   ") == .revert(.empty))
+        check("repair guard: a clean prompt stays clean",
+              RepairGuard.judge(before: clean, after: clean, revised: "text") == .accept)
+
+        // The gate's findings must reach the repair stage, or a prompt the linter rejects ships
+        // because the critic said "ship".
+        var ship = Critique()
+        ship.verdict = "ship"
+        let fromGate = RepairGuard.issues(critique: ship, lint: majorAfter)
+        check("repair guard: gate majors reach repair when the critic says ship",
+              fromGate.count == 1 && fromGate[0].axis == "criteria", "\(fromGate.count)")
+        check("repair guard: gate minors alone do not trigger repair",
+              RepairGuard.issues(critique: ship, lint: minorAfter).isEmpty)
+        check("repair guard: a clean gate and a shipping critic trigger nothing",
+              RepairGuard.issues(critique: ship, lint: clean).isEmpty)
+
+        // The critic and the gate both name the same missing section. The repair prompt must show
+        // it once. An id-based dedup never matched, because the gate has no quote.
+        var both = Critique()
+        both.verdict = "repair"
+        both.issues = [CritiqueIssue(axis: "deliverable", severity: .blocker, quote: "the text",
+                                     problem: "Missing output contract section: no heading",
+                                     fix: "Add one.")]
+        let deduped = RepairGuard.issues(critique: both, lint: report([(.blocker, "missing-output contract")]))
+        check("repair guard: a defect both reviewers name appears once",
+              deduped.count == 1, "\(deduped.count)")
+
+        // The writer was handed all twelve principles regardless of target, so a chat message was
+        // told to write autonomy sections by principle 8 and told to omit them by its own target
+        // guidance. Two orders, one message, and the model had to guess.
+        let chatWriter = MetaPrompts.writer(target: .chat)
+        let agentWriter = MetaPrompts.writer(target: .agentTask)
+        check("prompts: a chat writer is not told to write autonomy",
+              !chatWriter.contains("Default to acting"))
+        check("prompts: an agent writer is told to write autonomy",
+              agentWriter.contains("Default to acting"))
+        check("prompts: the principle count matches the axes the target is scored on",
+              chatWriter.contains("exactly these \(Axis.applicable(to: .chat).count),")
+                && agentWriter.contains("exactly these \(Axis.applicable(to: .agentTask).count),"))
+
+        // Every emitted lint id must resolve to an axis. The table once keyed on `section:` and on
+        // ids no check constructed, so seven issue types all reported `consistency`.
+        // Built from the real section table, so renaming a section cannot silently unmoor its axis.
+        var emitted = ["fence", "preamble", "filler", "shouting", "placeholders", "silent-defaults",
+                       "format-conflict", "limit-conflict-words", "meta", "too-short", "too-long",
+                       "copy", "unbounded", "executed", "vague-criteria"]
+        for target in PromptTarget.allCases {
+            emitted += PromptLinter.requiredSections(for: target).map { "missing-\($0.0)" }
+        }
+        let unmapped = emitted.filter { id in
+            let issue = PromptLinter.Issue(id: id, severity: .major, title: "", detail: "", fix: "")
+            // `consistency` is the fallback, so a mapping that lands there proves nothing unless
+            // the id genuinely defends consistency.
+            // These defend consistency genuinely: a system prompt's behaviour section is where
+            // rule pairs live, so "missing behaviour" really is a consistency finding.
+            let honestConsistency = ["format-conflict", "limit-conflict-words", "missing-behaviour"]
+            return issue.axis == "consistency" && !honestConsistency.contains(id)
+        }
+        check("linter: every emitted issue id maps to its own axis", unmapped.isEmpty,
+              unmapped.joined(separator: ","))
 
         // The exemplars are few-shot training data for the writer. If one fails the gate the
         // writer is taught a shape the tool then rejects — that happened, and nothing caught it.
