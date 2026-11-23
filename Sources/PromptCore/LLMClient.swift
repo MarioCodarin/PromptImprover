@@ -14,6 +14,10 @@ public enum LLMError: LocalizedError {
     case api(String)
     case missingKey
     case truncated
+    /// No byte arrived for the stall timeout. Transient: a retry may get a live connection.
+    case stalled(TimeInterval)
+    /// The run's budget ran out. Never retried; the pipeline returns what it already has.
+    case deadline
 
     public var errorDescription: String? {
         switch self {
@@ -22,11 +26,14 @@ public enum LLMError: LocalizedError {
         case .api(let msg): return msg
         case .missingKey: return "No API key set for this endpoint. Open Settings (⌘,)."
         case .truncated: return "The model's reply was cut off before it finished. Try again, or pick a model with a larger output limit."
+        case .stalled(let s): return "The endpoint stopped sending for \(Int(s)) seconds."
+        case .deadline: return "The run hit its time limit."
         }
     }
 
     /// Worth another attempt: rate limits, gateway hiccups, overload. A 400 or 401 never is.
     public var isTransient: Bool {
+        if case .stalled = self { return true }
         if case .http(let code, _) = self {
             return [408, 409, 429, 500, 502, 503, 504, 529].contains(code)
         }
@@ -120,7 +127,31 @@ public final class UsageTracker {
     }
 }
 
-public struct LLMClient {
+/// What the pipeline needs from a model provider. `LLMClient` speaks HTTP; a test can supply a
+/// scripted transport and exercise every stage, budget and failure path without a server.
+public protocol LLMTransport {
+    /// Accumulated across every call made through this transport.
+    var usage: UsageTracker { get }
+    /// The user's configured reasoning effort, or nil to send none.
+    var defaultEffort: String? { get }
+    func stream(system: String, messages: [ChatMessage], model: String,
+                options: LLMClient.Options) -> AsyncThrowingStream<String, Error>
+}
+
+public extension LLMTransport {
+    func complete(system: String, messages: [ChatMessage], model: String,
+                  options: LLMClient.Options = .default) async throws -> String {
+        var out = ""
+        for try await chunk in stream(system: system, messages: messages, model: model, options: options) {
+            out += chunk
+        }
+        return out
+    }
+}
+
+public struct LLMClient: LLMTransport {
+    public var defaultEffort: String? { endpoint.reasoningEffort }
+
     public let endpoint: Endpoint
     public let apiKey: String
     /// Shared across the whole pipeline, so one run reports one total.
@@ -161,11 +192,27 @@ public struct LLMClient {
         public var streamOptions = true
         /// Mirrors the endpoint's configured effort; cleared if the gateway rejects the parameter.
         public var reasoningEffort: String?
+        /// Time limits. The default is generous rather than absent, so a caller that forgets to
+        /// pass a budget still cannot hang forever.
+        public var budget = Budget.unbounded()
+        public init(temperature: Double? = nil, maxTokens: Int? = nil, jsonMode: Bool = false,
+                    reasoningEffort: String? = nil, budget: Budget = .unbounded()) {
+            self.temperature = temperature; self.maxTokens = maxTokens; self.jsonMode = jsonMode
+            self.reasoningEffort = reasoningEffort; self.budget = budget
+        }
+        /// The options for one pipeline call: its output ceiling, JSON mode, and the run's budget.
+        /// `endpointEffort` is the user's setting; JSON stages drop to "low" when one is set at all,
+        /// so an endpoint with no effort configured is never sent the parameter.
+        public static func call(_ kind: CallKind, budget: Budget, endpointEffort: String?) -> Options {
+            let effort = endpointEffort.map { kind.prefersLowEffort ? "low" : $0 }
+            return Options(temperature: kind.isJSON ? 0 : nil, maxTokens: kind.maxTokens,
+                           jsonMode: kind.isJSON, reasoningEffort: effort, budget: budget)
+        }
         public static let `default` = Options()
         public static func json(temperature: Double = 0) -> Options { .init(temperature: temperature, jsonMode: true) }
     }
 
-    private func request(_ path: String) throws -> URLRequest {
+    private func request(_ path: String, timeout: TimeInterval = 60) throws -> URLRequest {
         // The `--vm` probe kills the transport to exercise the error paths on demand.
         if poison.isDead { throw URLError(.cannotConnectToHost) }
         let base = endpoint.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
@@ -176,7 +223,9 @@ public struct LLMClient {
         guard scheme == "https" || (scheme == "http" && loopback) else {
             throw LLMError.api("Refusing to send your API key over \(scheme)://. Use https (plain http is only allowed for localhost).")
         }
-        var req = URLRequest(url: url, timeoutInterval: 600)
+        // URLSession's interval is an idle timer, not a total: it resets on every byte. 600 s here
+        // meant a silent gateway held each attempt for ten minutes.
+        var req = URLRequest(url: url, timeoutInterval: timeout)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         switch endpoint.format {
         case .openAI:
@@ -226,16 +275,6 @@ public struct LLMClient {
         }
     }
 
-    public func complete(system: String,
-                  messages: [ChatMessage],
-                  model: String,
-                  options: Options = .default) async throws -> String {
-        var out = ""
-        for try await chunk in stream(system: system, messages: messages, model: model, options: options) {
-            out += chunk
-        }
-        return out
-    }
 
     // MARK: - Streaming with retry and parameter fallback
 
@@ -325,12 +364,15 @@ public struct LLMClient {
                     [.timedOut, .networkConnectionLost, .notConnectedToInternet,
                      .secureConnectionFailed].contains($0.code)
                 } ?? false
+                if opts.budget.isExpired { throw LLMError.deadline }
                 guard !yieldedAnything, transientCount < delays.count,
                       err.isTransient || transportTransient, !Task.isCancelled else { throw err }
                 // Count transient failures separately from parameter fallbacks: a gateway that
                 // rejected two optional parameters must not eat the retries meant for a 503.
                 transientCount += 1
                 let base = delays[transientCount - 1]
+                // A retry that cannot finish inside the budget is not worth its backoff.
+                guard opts.budget.remaining > base + 5 else { throw err }
                 let jitter = Double.random(in: 0...0.4) * base
                 try await Task.sleep(nanoseconds: UInt64((base + jitter) * 1_000_000_000))
             }
@@ -342,12 +384,47 @@ public struct LLMClient {
                             model: String,
                             options: Options,
                             yield: (String) -> Void) async throws {
-        var req = try request(endpoint.format == .openAI ? "chat/completions" : "messages")
+        let budget = options.budget
+        if budget.isExpired { throw LLMError.deadline }
+        var req = try request(endpoint.format == .openAI ? "chat/completions" : "messages",
+                              timeout: min(budget.stallTimeout, max(1, budget.remaining)))
         req.httpMethod = "POST"
         req.httpBody = try JSONSerialization.data(withJSONObject: body(system, messages, model, options))
         usage.beginCall()
 
-        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        let bytes: URLSession.AsyncBytes, resp: URLResponse
+        do {
+            (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        } catch let e as URLError where e.code == .timedOut {
+            // URLSession's idle timer and the watchdog measure the same thing; report one error.
+            throw budget.isExpired ? LLMError.deadline : LLMError.stalled(budget.stallTimeout)
+        }
+        // The watchdog. URLSession's idle timer covers the wait for headers; this covers the body,
+        // and the run's deadline, by cancelling the data task. The loop below then ends with a
+        // cancellation, which is translated back into whichever limit fired.
+        let watchdog = Watchdog(stall: budget.stallTimeout, deadline: budget.deadline)
+        let guardTask = Task { [task = bytes.task] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if watchdog.check() != nil { task.cancel(); return }
+            }
+        }
+        defer { guardTask.cancel() }
+        do {
+            try await consume(bytes, resp, watchdog: watchdog, yield: yield)
+        } catch {
+            if let fired = watchdog.fired {
+                throw fired == .deadline ? LLMError.deadline : LLMError.stalled(budget.stallTimeout)
+            }
+            if let e = error as? URLError, e.code == .timedOut {
+                throw budget.isExpired ? LLMError.deadline : LLMError.stalled(budget.stallTimeout)
+            }
+            throw error
+        }
+    }
+
+    private func consume(_ bytes: URLSession.AsyncBytes, _ resp: URLResponse, watchdog: Watchdog,
+                         yield: (String) -> Void) async throws {
         if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             var text = ""
             for try await line in bytes.lines { text += line; if text.count > 4000 { break } }
@@ -363,6 +440,7 @@ public struct LLMClient {
         // `message_delta` as `stop_reason`, so only that format was ever correct.
         var truncated = false
         for try await line in bytes.lines {
+            watchdog.touch()
             guard line.hasPrefix("data:") else {
                 if !line.hasPrefix("event:") && !line.hasPrefix(":") && stray.count < 2000 { stray += line }
                 continue
@@ -476,3 +554,28 @@ public struct LLMClient {
     }
 }
 
+/// Last-activity clock for one streamed call, shared between the reading loop and its guard task.
+final class Watchdog: @unchecked Sendable {
+    enum Limit { case stall, deadline }
+    private let lock = NSLock()
+    private var last = Date()
+    private var _fired: Limit?
+    let stall: TimeInterval
+    let deadline: Date
+
+    init(stall: TimeInterval, deadline: Date) { self.stall = stall; self.deadline = deadline }
+
+    func touch() { lock.withLock { last = Date() } }
+    var fired: Limit? { lock.withLock { _fired } }
+
+    /// Records and returns the limit that has been passed, if any. The first one to fire wins.
+    func check(now: Date = Date()) -> Limit? {
+        lock.withLock {
+            if _fired == nil {
+                if now >= deadline { _fired = .deadline }
+                else if now.timeIntervalSince(last) > stall { _fired = .stall }
+            }
+            return _fired
+        }
+    }
+}

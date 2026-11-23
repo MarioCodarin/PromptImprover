@@ -55,7 +55,7 @@ BASE="http://127.0.0.1:$PORT"
 expect "fast: one call, gate still fails a weak prompt" 1 "calls 1" \
   -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor Fast
 
-expect "standard: diagnose, write, verify, repair, reverify" 0 "reverify ship" \
+expect "standard: clarify, write, lint, one repair from the lint findings" 0 "calls 3" \
   -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor Standard
 
 expect "deep: adds acceptance tests" 0 "tests 2 cases" \
@@ -74,29 +74,35 @@ expect "a gateway that rejects stream_options and reasoning_effort still complet
   -- "$BIN" --e2e "$BASE/strict/v1" --key k --model mock --rigor Standard
 
 # The needle is the assertion. It read "tokens 0 in", which is the bug, not the fix.
-expect "anthropic usage counts cached input too" 0 "tokens 10000 in (2000 cached)" \
+# Three calls at 1500 + 400 cached + 100 written each.
+expect "anthropic usage counts cached input too" 0 "tokens 6000 in (1200 cached)" \
   -- "$BIN" --e2e "$BASE/anthropic/v1" --format anthropic --key k --model mock --rigor Standard
 
-expect "chat-completions usage counts input tokens" 0 "tokens 10500 in" \
+# Three calls at 2100 each.
+expect "chat-completions usage counts input tokens" 0 "tokens 6300 in" \
   -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor Standard
 
-# The two halves of the repair trigger, which have to stay in opposite directions.
-# Polish only: the gate passes, the critic objects to minors, and no call is spent. Before this
-# rule a live run took a 100/100 prompt to 97/100, accepted because minors never veto.
-expect "polish does not spend a repair call on a clean prompt" 0 "calls 3" \
+# A clean first draft costs two calls on Standard: clarify and write. No reviewer, no repair.
+expect "standard: a clean prompt costs two calls" 0 "calls 2" \
   -- "$BIN" --e2e "$BASE/polish/v1" --key k --model mock --rigor Standard
+
+# The two halves of the repair trigger, which have to stay in opposite directions. The reviewer
+# runs on Deep only. Polish: the gate passes, the reviewer objects to minors, and no repair call
+# is spent — clarify, write, review, tests.
+expect "polish does not spend a repair call on a clean prompt" 0 "calls 4" \
+  -- "$BIN" --e2e "$BASE/polish/v1" --key k --model mock --rigor Deep
 
 # A fabrication the linter cannot see still repairs, even though the gate is clean. Skipping this
 # would ship the one failure the tool exists to prevent.
 expect "a fabrication the linter cannot see still repairs" 0 "repair accepted" \
-  -- "$BIN" --e2e "$BASE/fabricate/v1" --key k --model mock --rigor Standard
+  -- "$BIN" --e2e "$BASE/fabricate/v1" --key k --model mock --rigor Deep
 
 # The other half of the gate. An unparseable critic reply used to drop the whole repair decision,
 # so a stray brace in the critic's prose switched off the deterministic half — the half that exists
 # because the critic cannot be trusted. The writer's first attempt is missing its success criteria,
 # so the linter has a blocker and repair must run anyway.
 expect "an unparseable verdict does not switch the gate off" 0 "repair accepted" \
-  -- "$BIN" --e2e "$BASE/garbage/v1" --key k --model mock --rigor Standard
+  -- "$BIN" --e2e "$BASE/garbage/v1" --key k --model mock --rigor Deep
 
 expect "a truncated reply fails loudly instead of shipping half a prompt" 2 "cut off" \
   -- "$BIN" --e2e "$BASE/truncate/v1" --key k --model mock --rigor Standard
@@ -110,6 +116,23 @@ expect "a truncated reply still counts the tokens it spent" 2 "spent: 4200 in" \
 
 expect "an unreachable host reports an error" 2 "" \
   -- "$BIN" --e2e "http://127.0.0.1:1/v1" --key k --model mock --rigor Fast
+
+# The two time limits. A server that goes silent mid-write is cut by the stall watchdog (and its
+# one retry), not held for ten minutes; the mock sleeps 30 s, so a pass here is a pass in ~6 s.
+T0=$(date +%s)
+expect "a silent gateway is cut off by the stall watchdog" 2 "stopped sending" \
+  -- "$BIN" --e2e "$BASE/stall/v1" --key k --model mock --rigor Fast --stall 2 --deadline 12
+T1=$(date +%s)
+if (( T1 - T0 < 20 )); then ok "the stall cut-off took $((T1 - T0))s, not the mock's 30"; else bad "stall took $((T1 - T0))s"; fi
+
+# A write slower than the whole budget ends on the deadline, with an error: there is no finished
+# prompt to fall back on, and a fragment is never shipped.
+expect "a write past the deadline fails instead of hanging" 2 "time limit" \
+  -- "$BIN" --e2e "$BASE/drip/v1" --key k --model mock --rigor Fast --deadline 3
+
+# Too little budget left for a repair: the written prompt is kept and the run says why.
+expect "a short budget keeps the written prompt and skips repair" 1 "ended: time limit" \
+  -- "$BIN" --e2e "$BASE/v1" --key k --model mock --rigor Standard --deadline 10
 
 # --e2e drives PromptEngine, so it covers the pipeline and none of the state machine. The probe
 # drives the real view model: a fail() that destroyed the prompt it had just restored passed a

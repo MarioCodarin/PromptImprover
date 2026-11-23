@@ -1,80 +1,80 @@
 import Foundation
 
-/// The pipeline's stages, with no UI attached.
+/// The model calls, one per stage, with no orchestration. `PromptPipeline` decides which run and
+/// when; this type only knows how to make each one and parse its reply.
 ///
-/// The view model owns the interactive parts (asking questions, showing partial text, cancelling);
-/// this type owns the model calls and the parsing. That split is what makes the pipeline testable:
-/// `--e2e` drives exactly these functions against a real endpoint, and a mock server exercises the
-/// same code path the app uses in production.
+/// Every call takes the run's `Budget` and names its `CallKind`, so the output ceiling, JSON mode
+/// and reasoning effort are decided in one table (`CallKind`) instead of at each call site.
 public struct PromptEngine {
-    public let client: LLMClient
+    public let transport: any LLMTransport
     public let model: String
     public let target: PromptTarget
     public let profile: String?
     public let draft: String
 
-    public init(client: LLMClient, model: String, target: PromptTarget, profile: String?, draft: String) {
-        self.client = client; self.model = model; self.target = target
+    public init(client: any LLMTransport, model: String, target: PromptTarget, profile: String?, draft: String) {
+        self.transport = client; self.model = model; self.target = target
         self.profile = profile; self.draft = draft
     }
 
-    /// Stage 1. Returns a diagnosis even when the model's JSON is unusable, so the writer is never blocked.
-    public func diagnose() async throws -> Diagnosis {
+    private func options(_ kind: CallKind, _ budget: Budget) -> LLMClient.Options {
+        .call(kind, budget: budget, endpointEffort: transport.defaultEffort)
+    }
+
+    /// Clarify. Returns a diagnosis even when the JSON is unusable, so the writer is never blocked.
+    public func diagnose(budget: Budget = .unbounded()) async throws -> Diagnosis {
         let system = MetaPrompts.personalize(MetaPrompts.analyzer(target: target), profile: profile)
-        let raw = try await client.complete(system: system,
-                                            messages: [.user(MetaPrompts.analyzerInput(draft, target: target))],
-                                            model: model,
-                                            options: .json())
+        let raw = try await transport.complete(system: system,
+                                               messages: [.user(MetaPrompts.analyzerInput(draft, target: target))],
+                                               model: model, options: options(.clarify, budget))
         return ResponseParsing.parseDiagnosis(raw)
     }
 
-    /// Stage 2. Yields the accumulated text after every chunk, so a cancelled run still has a prefix.
-    public func write(brief: String) -> AsyncThrowingStream<String, Error> {
-        stream(system: MetaPrompts.writer(target: target), messages: [.user(brief)], model: model)
+    /// Write. Yields the accumulated text after every chunk, so a cut-off run still has a prefix.
+    public func write(brief: String, budget: Budget = .unbounded()) -> AsyncThrowingStream<String, Error> {
+        stream(system: MetaPrompts.writer(target: target), messages: [.user(brief)], kind: .write, budget: budget)
     }
 
-    /// Stage 3. Nil means the reviewer's reply could not be parsed: not a reason to discard the prompt.
-    public func verify(prompt: String) async throws -> Critique? {
-        let system = MetaPrompts.critic(target: target)
-        let raw = try await client.complete(system: system,
-                                            messages: [.user(MetaPrompts.criticInput(prompt: prompt, draft: draft, target: target))],
-                                            model: model,
-                                            options: .json())
+    /// Review (Deep only). Nil means the reply could not be parsed: not a reason to discard the prompt.
+    public func verify(prompt: String, budget: Budget = .unbounded()) async throws -> Critique? {
+        let raw = try await transport.complete(system: MetaPrompts.critic(target: target),
+                                               messages: [.user(MetaPrompts.criticInput(prompt: prompt, draft: draft, target: target))],
+                                               model: model, options: options(.critique, budget))
         return ResponseParsing.parseCritique(raw)
     }
 
-    /// Stage 4. Streams like the writer, so a long repair is visible instead of a spinner.
-    public func repair(prompt: String, issues: [CritiqueIssue]) -> AsyncThrowingStream<String, Error> {
+    /// Repair. One targeted rewrite from concrete, quoted feedback (GEPA's reflective mutation).
+    public func repair(prompt: String, issues: [CritiqueIssue], budget: Budget = .unbounded()) -> AsyncThrowingStream<String, Error> {
         stream(system: MetaPrompts.repair,
                messages: [.user(MetaPrompts.repairInput(prompt: prompt, issues: issues, target: target,
-                                                        draft: draft,
-                                                        lengthTarget: target.lengthTarget))],
-               model: model)
+                                                        draft: draft, lengthTarget: target.lengthTarget))],
+               kind: .repair, budget: budget)
     }
 
-    /// Stage 5. Nil on failure: tests are a bonus and must never cost the prompt.
-    public func tests(prompt: String) async throws -> EvalSuite? {
-        let raw = try await client.complete(system: MetaPrompts.evalSuite(target: target),
-                                            messages: [.user(MetaPrompts.evalInput(prompt: prompt, target: target))],
-                                            model: model,
-                                            options: .json())
+    /// Acceptance tests (Deep only). Nil on failure: tests are a bonus and must never cost the prompt.
+    public func tests(prompt: String, budget: Budget = .unbounded()) async throws -> EvalSuite? {
+        let raw = try await transport.complete(system: MetaPrompts.evalSuite(target: target),
+                                               messages: [.user(MetaPrompts.evalInput(prompt: prompt, target: target))],
+                                               model: model, options: options(.tests, budget))
         return ResponseParsing.parseEvalSuite(raw)
     }
 
     /// Refine: a revision of the whole prompt with the conversation so far as context.
-    public func revise(history: [ChatMessage]) -> AsyncThrowingStream<String, Error> {
-        stream(system: MetaPrompts.writer(target: target), messages: history, model: model)
+    public func revise(history: [ChatMessage], budget: Budget = .unbounded()) -> AsyncThrowingStream<String, Error> {
+        stream(system: MetaPrompts.writer(target: target), messages: history, kind: .refine, budget: budget)
     }
 
     // MARK: - Streaming plumbing
 
-    private func stream(system: String, messages: [ChatMessage], model: String) -> AsyncThrowingStream<String, Error> {
+    private func stream(system: String, messages: [ChatMessage], kind: CallKind,
+                        budget: Budget) -> AsyncThrowingStream<String, Error> {
         let base = MetaPrompts.personalize(system, profile: profile)
+        let opts = options(kind, budget)
         return AsyncThrowingStream { continuation in
             let task = Task {
                 var raw = ""
                 do {
-                    for try await chunk in client.stream(system: base, messages: messages, model: model) {
+                    for try await chunk in transport.stream(system: base, messages: messages, model: model, options: opts) {
                         if Task.isCancelled { break }
                         raw += chunk
                         continuation.yield(ResponseParsing.stripThinking(raw))
@@ -89,7 +89,5 @@ public struct PromptEngine {
     }
 
     /// Final form of a streamed reply: thinking stripped, one wrapper fence removed, trimmed.
-    /// Output hygiene belongs to `ResponseParsing`; kept as a named step because "finalise what
-    /// the model produced" is a pipeline concept, not a parsing detail.
     public static func finalize(_ raw: String) -> String { ResponseParsing.finalize(raw) }
 }

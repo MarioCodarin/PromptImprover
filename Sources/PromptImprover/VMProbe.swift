@@ -104,83 +104,65 @@ enum VMProbe {
                   "\(vm2.output.count) chars, lint \(vm2.lint == nil ? "nil" : "set")")
         }
 
-        // ---- 3. Cancelling a verify must not throw away a finished prompt. ----------------
+        // ---- 3. Stopping a repair must not throw away the finished prompt it started from. --
         //
-        // `verifying` and `testing` run *after* the text is final and linted, but `lastGood` was
-        // only ever populated by refine and repair — so Stop during "Checking it against the
-        // rubric…" ran `if !restored { output = "" }` and blanked a complete result. A button
-        // labelled Stop deleted the work the user was waiting for.
+        // On Standard the stage after the text is final is the repair. Stop there has to put the
+        // written, linted prompt back, not blank it and not keep a half-streamed rewrite.
         //
-        // Driven against `/slow/`, because a loopback mock answers a verify in under a
-        // millisecond and the phase is never observable.
+        // Driven against `/slow/`: each request waits 1.5 s, so the phase is observable and the
+        // text on screen at `.repairing` is still the written prompt.
         let slowClient = LLMClient(endpoint: Endpoint(name: "slow", baseURL: Self.mode("slow", of: base),
                                                       format: .openAI, models: [model],
                                                       selectedModel: model),
                                    apiKey: key)
         let vm4 = ImproverViewModel()
         vm4.draft = "make me a landing page for a coffee subscription"
-        // There is no user here, so stage 1 must not park the run in `.answering`. Without this
-        // a Standard run waits for an answer that never comes and every assertion times out.
+        // There is no user here, so clarify must not park the run in `.answering`.
         vm4.askQuestions = false
         vm4.rigor = .standard
         vm4.begin(client: slowClient, model: model, profile: nil)
-        let reachedVerify = await settle(vm4, until: { $0.phase == .verifying || $0.error != nil },
+        let reachedRepair = await settle(vm4, until: { $0.phase == .repairing || $0.error != nil },
                                          timeout: 40)
         let finalText = vm4.output
         let finalLint = vm4.lint
-        if reachedVerify, vm4.error == nil, !finalText.isEmpty {
+        if reachedRepair, vm4.error == nil, !finalText.isEmpty {
             vm4.cancel()
             _ = await settle(vm4, until: { !$0.isBusy }, timeout: 5)
-            check("stopping a verify keeps the finished prompt", vm4.output == finalText,
+            check("stopping a repair keeps the written prompt", vm4.output == finalText,
                   "output is \(vm4.output.count) chars, expected \(finalText.count)")
-            check("stopping a verify keeps its structure score", vm4.lint?.score == finalLint?.score,
+            check("stopping a repair keeps its structure score", vm4.lint?.score == finalLint?.score,
                   "lint \(vm4.lint.map { "\($0.score)" } ?? "nil")")
-            check("stopping a verify leaves a copyable result", !vm4.output.isEmpty)
-            // Two calls that demonstrably cost tokens were reported as free, because `finish` is
-            // the only other writer of these and cancel never ran it.
-            check("stopping a verify still reports what it spent",
+            check("stopping a repair leaves a copyable result", !vm4.output.isEmpty)
+            check("stopping a repair still reports what it spent",
                   vm4.elapsed > 0 && vm4.tokensIn > 0,
                   "\(vm4.elapsed)s, \(vm4.tokensIn) in")
         } else {
-            check("a Standard run reaches .verifying", false, vm4.error ?? "timed out")
+            check("a Standard run with a weak first draft reaches .repairing", false, vm4.error ?? "timed out")
         }
 
-        // ---- 3b. Stopping a *re-verify* must drop the verdict it never replaced. ------------
-        //
-        // `reverify` already knows there is no score for what is on screen when the re-check is
-        // lost, but `cancel` did not apply the same rule: the critique in hand scores the
-        // pre-repair text, and the panel rendered "Rubric 20/100 — Below the bar …" plus "One
-        // repair pass was applied. What is listed above survived it." over a prompt that had just
-        // re-scored 94/100. Asserted separately because the phase is the same as a first verify.
+        // ---- 3b. Stopping Deep's review keeps the prompt and drops nothing it earned. ------
         let vm5 = ImproverViewModel()
         vm5.draft = "make me a landing page for a coffee subscription"
         vm5.askQuestions = false
-        vm5.rigor = .standard
+        vm5.rigor = .deep
         vm5.begin(client: LLMClient(endpoint: Endpoint(name: "slow2",
                                                        baseURL: Self.mode("slow", of: base),
                                                        format: .openAI, models: [model],
                                                        selectedModel: model),
                                     apiKey: key),
                   model: model, profile: nil)
-        // Wait for the re-check: a repair has been applied and the phase is verifying again.
-        let reachedReverify = await settle(
-            vm5,
-            until: { $0.phase == .verifying && $0.repairOutcome == .applied || $0.error != nil },
-            timeout: 60)
-        if reachedReverify, vm5.error == nil {
+        let reachedReview = await settle(vm5, until: { $0.phase == .verifying || $0.error != nil },
+                                         timeout: 40)
+        let reviewed = vm5.output
+        if reachedReview, vm5.error == nil, !reviewed.isEmpty {
             vm5.cancel()
             _ = await settle(vm5, until: { !$0.isBusy }, timeout: 5)
-            check("stopping a re-verify drops the pre-repair verdict", vm5.critique == nil,
-                  "critique still \(vm5.critique == nil ? "nil" : "set")")
-            // The outcome describes the repaired text, which is still on screen, so it stays. It
-            // is the only explanation of why the prompt reads the way it does.
-            check("stopping a re-verify keeps the repair outcome it earned",
-                  vm5.repairOutcome == .applied,
-                  "outcome \(vm5.repairOutcome)")
-            check("stopping a re-verify keeps the repaired text", !vm5.output.isEmpty,
-                  "\(vm5.output.count) chars")
+            check("stopping a review keeps the prompt", vm5.output == reviewed,
+                  "\(vm5.output.count) chars, expected \(reviewed.count)")
+            check("stopping a review shows no verdict it never reached", vm5.critique == nil,
+                  "critique still set")
         } else {
-            check("a repair reaches a re-verify", false, vm5.error ?? "timed out")
+            check("a Deep run reaches .verifying", false, vm5.error ?? "timed out")
         }
 
         // ---- 4. The depth is fixed when the run starts. ------------------------------------

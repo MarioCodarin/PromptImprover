@@ -251,9 +251,9 @@ TESTS = {
 
 def classify(system: str, messages: list) -> str:
     s = system.lower()
-    if "diagnostic stage" in s:
+    if "diagnostic stage" in s or "what is missing before it is written" in s:
         return "diagnosis"
-    if "verification stage" in s:
+    if "verification stage" in s or "review a prompt someone else wrote" in s:
         return "critique"
     if "repair stage" in s:
         return "repair"
@@ -344,7 +344,7 @@ class Handler(BaseHTTPRequestHandler):
         parts = self.path.lstrip("/").split("/")
         mode = "normal"
         if parts and parts[0] in ("truncate", "retry", "nojson", "anthropic", "strict", "revert",
-                                  "polish", "fabricate", "slow", "garbage"):
+                                  "polish", "fabricate", "slow", "garbage", "stall", "drip"):
             mode = parts[0]
             parts = parts[1:]
         return mode, "/" + "/".join(parts)
@@ -443,12 +443,19 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b": keep-alive\n\n")
         self.wfile.flush()
 
+        # A gateway that accepts the write and then goes silent: the stall watchdog must end it.
+        if mode == "stall" and kind == "write":
+            time.sleep(30)
+            return
+        # A gateway that streams the write slower than any budget: the deadline must end it.
+        drip = 1.0 if (mode == "drip" and kind == "write") else 0.002
+
         step = 48
         for i in range(0, len(text), step):
             chunk = {"choices": [{"delta": {"content": text[i:i + step]}, "index": 0}]}
             self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
             self.wfile.flush()
-            time.sleep(0.002)
+            time.sleep(drip)
         truncated = mode == "truncate" and kind == "write" and attempt == 0
         finish = {"choices": [{"delta": {}, "finish_reason": "length" if truncated else "stop", "index": 0}]}
         self.wfile.write(("data: " + json.dumps(finish) + "\n\n").encode())

@@ -166,8 +166,8 @@ public enum Rigor: String, CaseIterable, Identifiable, Codable {
     public var blurb: String {
         switch self {
         case .fast: return "Write only. One call. For throwaway prompts."
-        case .standard: return "Diagnose, write, verify against the rubric, repair real defects. Three to four calls."
-        case .deep: return "Standard plus a second verification pass and an acceptance-test suite. Five to six calls."
+        case .standard: return "Clarify, write, lint, and one repair if the linter finds a real defect. Two to three calls."
+        case .deep: return "Standard plus an independent review and an acceptance-test suite. Four to five calls."
         }
     }
 
@@ -175,8 +175,8 @@ public enum Rigor: String, CaseIterable, Identifiable, Codable {
     public var stages: [String] {
         switch self {
         case .fast: return ["Write", "Lint"]
-        case .standard: return ["Diagnose", "Write", "Lint", "Verify", "Repair"]
-        case .deep: return ["Diagnose", "Write", "Lint", "Verify", "Repair", "Tests"]
+        case .standard: return ["Clarify", "Write", "Lint", "Repair"]
+        case .deep: return ["Clarify", "Write", "Lint", "Review", "Repair", "Tests"]
         }
     }
 

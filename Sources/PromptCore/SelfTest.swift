@@ -550,8 +550,8 @@ public enum SelfTest {
         check("prompts: an agent writer is told to write autonomy",
               agentWriter.contains("Default to acting"))
         check("prompts: the principle count matches the axes the target is scored on",
-              chatWriter.contains("exactly these \(Axis.applicable(to: .chat).count),")
-                && agentWriter.contains("exactly these \(Axis.applicable(to: .agentTask).count),"))
+              chatWriter.contains("\(Axis.applicable(to: .chat).count) principles.")
+                && agentWriter.contains("\(Axis.applicable(to: .agentTask).count) principles."))
 
         // Every emitted lint id must resolve to an axis. The table once keyed on `section:` and on
         // ids no check constructed, so seven issue types all reported `consistency`.

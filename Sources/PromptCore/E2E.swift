@@ -29,6 +29,9 @@ public enum E2E {
         /// path is exercisable. Without it the harness can only ever simulate a user who skipped
         /// every question, and `silent-defaults` fires where the app would be clean.
         var answerQuestions = false
+        /// Overrides for the run's budget, so the time-limit paths are testable in seconds.
+        var deadline: TimeInterval?
+        var stall: TimeInterval?
     }
 
     public static func parse(_ args: [String]) -> Config? {
@@ -103,6 +106,12 @@ public enum E2E {
                 }
             case "--answer-questions":
                 c.answerQuestions = true
+            case "--deadline":
+                guard let v = next().flatMap(Double.init), v > 0 else { return nil }
+                c.deadline = v; i += 1
+            case "--stall":
+                guard let v = next().flatMap(Double.init), v > 0 else { return nil }
+                c.stall = v; i += 1
             case "--json":
                 c.json = true
             default: break
@@ -113,152 +122,98 @@ public enum E2E {
         return c
     }
 
+    /// Drives `PromptPipeline`, the same orchestration the app uses, and prints what happened.
     public static func run(_ c: Config) async -> Int32 {
         let endpoint = Endpoint(name: "e2e", baseURL: c.baseURL, format: c.format,
                                 models: [c.model], selectedModel: c.model,
                                 reasoningEffort: c.effort)
         let client = LLMClient(endpoint: endpoint, apiKey: c.key)
-        let engine = PromptEngine(client: client, model: c.model, target: c.target,
-                                  profile: nil, draft: c.draft)
+        let pipeline = PromptPipeline(request: .init(draft: c.draft, target: c.target, rigor: c.rigor,
+                                                     model: c.model, profile: nil),
+                                      transport: client)
+        let started = Date()
+        var budget = Budget.for(c.rigor, from: started)
+        if let d = c.deadline { budget.deadline = started.addingTimeInterval(d) }
+        if let s = c.stall { budget.stallTimeout = s }
 
         var calls = 0
-        var stageTimes: [(String, Double)] = []
-        func stamp(_ name: String, _ start: Date) { stageTimes.append((name, Date().timeIntervalSince(start))) }
+        var stageTimes: [String: Double] = [:]
+        var current: (name: String, start: Date)?
+        func stamp(_ next: String?) {
+            if let cur = current { stageTimes[cur.name, default: 0] += Date().timeIntervalSince(cur.start) }
+            current = next.map { ($0, Date()) }
+        }
 
         do {
-            // Stage 1. Fast skips it, exactly like the app: one call, no questions, no critique.
-            var t = Date()
-            var diagnosis = Diagnosis()
+            // Clarify. Fast skips it, exactly like the app.
+            var diagnosis: Diagnosis?
+            var questions: [ClarifyingQuestion] = []
             if c.rigor.verifies {
-                diagnosis = try await engine.diagnose()
+                stamp("clarify")
+                let d = try await pipeline.clarify(budget: budget)
                 calls += 1
-                stamp("diagnose", t)
-                log("diagnose", "\(diagnosis.findings.count) findings, \(diagnosis.questions.count) questions, risk \(diagnosis.risk)")
+                diagnosis = d
+                log("clarify", "\(d.findings.count) findings, \(d.questions.count) questions, risk \(d.risk)")
+                // The harness has no user: it skips every question (the worst case), or accepts
+                // every recorded default with `--answer-questions`.
+                questions = c.answerQuestions ? d.questions.map { q in
+                    var copy = q; copy.answer = q.default; return copy
+                } : d.questions
             } else {
-                log("diagnose", "skipped (Fast)")
+                log("clarify", "skipped (Fast)")
             }
 
-            // Stage 2
-            t = Date()
-            let brief = MetaPrompts.composeBrief(draft: c.draft, diagnosis: diagnosis, questions: diagnosis.questions)
-            var raw = ""
-            for try await partial in engine.write(brief: brief) { raw = partial }
-            calls += 1
-            stamp("write", t)
-            var prompt = PromptEngine.finalize(raw)
-            guard !prompt.isEmpty else { return bail("writer returned nothing") }
-            log("write", "\(prompt.split(whereSeparator: \.isWhitespace).count) words")
-
-            // Mirrors the app: a question counts as unanswered when the user left it blank. The
-            // harness has no user, so it either skips every question (the default, worst case) or
-            // accepts every recorded default when `--answer-questions` is set.
-            let answered = c.answerQuestions ? diagnosis.questions.map { q -> ClarifyingQuestion in
-                var copy = q
-                copy.answer = q.default
-                return copy
-            } : diagnosis.questions
-            let unanswered = answered.filter {
-                $0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            }.count
-            var lint = PromptLinter.lint(prompt, target: c.target,
-                                         unansweredQuestions: unanswered, draft: c.draft)
-            log("lint", "\(lint.score)/100 — \(lint.summary)")
-
-            // Stage 3
-            var critique: Critique?
-            if c.rigor.verifies {
-                t = Date()
-                critique = try await engine.verify(prompt: prompt)
-                calls += 1
-                stamp("verify", t)
-                if let critique {
-                    log("verify", "\(critique.verdict), \(critique.issues.count) issues, rubric \(critique.total(for: c.target))/100")
-                } else {
-                    log("verify", "unparseable verdict — keeping the prompt")
-                }
-            }
-
-            // Stage 4. The same policy the app uses, from the same module: the union of the
-            // critic's issues and the gate's blockers/majors, judged by RepairGuard. This used to
-            // be re-implemented here and had drifted.
-            //
-            // An unparseable verdict is not an exemption. `critique.map { … } ?? []` skipped the
-            // gate whenever the critic's JSON failed to parse, so a stray brace in its prose
-            // switched off the deterministic half of the gate — the exact opposite of what the
-            // gate is for. An empty critique says nothing, which leaves the gate's issues.
-            let repairIssues = RepairGuard.issues(critique: critique ?? Critique(), lint: lint)
-            if c.rigor.repairs, !repairIssues.isEmpty {
-                t = Date()
-                var repaired = ""
-                for try await partial in engine.repair(prompt: prompt, issues: repairIssues) { repaired = partial }
-                calls += 1
-                stamp("repair", t)
-                let revised = PromptEngine.finalize(repaired)
-                let after = PromptLinter.lint(revised, target: c.target,
-                                              unansweredQuestions: unanswered, draft: c.draft)
-                let verdict = RepairGuard.judge(before: lint, after: after, revised: revised)
-                if verdict.note == nil {
-                    prompt = revised
-                    lint = after
-                    log("repair", "accepted — structure \(after.score)/100")
-                    // Re-score the shipped prompt so the rubric number describes what was produced,
-                    // not what it replaced.
-                    let before = critique?.total(for: c.target)
-                    t = Date()
-                    // Same tolerance as the app: losing the re-check is not losing the prompt.
-                    do {
-                        critique = try await engine.verify(prompt: prompt)
-                        calls += 1
-                        stamp("reverify", t)
-                        log("reverify", reverified(critique, was: before, target: c.target))
-                    } catch {
-                        // Losing the re-check is not losing the prompt: keep the text, drop the
-                        // score. The previous critique described the pre-repair text.
-                        critique = nil
-                        log("reverify", "failed (\(error.localizedDescription)) — kept the repaired prompt, dropped the score")
+            var result: PromptPipeline.Result?
+            var sawRepair = false
+            for try await event in pipeline.compose(diagnosis: diagnosis, questions: questions,
+                                                    priorCalls: calls, budget: budget) {
+                switch event {
+                case .stage(let s):
+                    stamp(s.rawValue)
+                case .partial:
+                    break
+                case .lint(let r):
+                    if !sawRepair { log("lint", "\(r.score)/100 — \(r.summary)") }
+                case .critique(let cr):
+                    log("review", "\(cr.verdict), \(cr.issues.count) issues")
+                case .repair(let outcome):
+                    sawRepair = true
+                    switch outcome {
+                    case .applied: log("repair", "accepted")
+                    case .reverted(let why): log("repair", "rejected — \(why), kept original")
+                    case .none: break
                     }
-                } else {
-                    log("repair", "rejected — \(verdict.note ?? "unknown"), kept original")
+                case .tests(let suite):
+                    log("tests", "\(suite.cases.count) cases")
+                case .finished(let r):
+                    stamp(nil)
+                    result = r
                 }
             }
+            guard let r = result else { return bail("the pipeline ended without a result") }
+            calls = r.calls
 
-            // Stage 5
-            var suite: EvalSuite?
-            if c.rigor.writesTests {
-                t = Date()
-                // Tests are a bonus; losing them must not lose the prompt. Mirrors writeTests().
-                do {
-                    suite = try await engine.tests(prompt: prompt)
-                    calls += 1
-                    stamp("tests", t)
-                    log("tests", "\(suite?.cases.count ?? 0) cases")
-                } catch {
-                    log("tests", "failed (\(error.localizedDescription)) — prompt kept")
-                }
-            }
-
-            let total = stageTimes.reduce(0) { $0 + $1.1 }
             let cost = client.usage.cost(inputPerM: c.priceIn, outputPerM: c.priceOut,
                                          readRatio: c.format == .anthropic ? 0.1 : 0.5)
             print("")
             print("── result ─────────────────────────────────────────")
-            print("calls \(calls) · \(String(format: "%.1f", total))s · structure \(lint.score)/100"
-                  + (critique.map { " · rubric \($0.total(for: c.target))/100" } ?? ""))
+            print("calls \(calls) · \(String(format: "%.1f", r.elapsed + (stageTimes["clarify"] ?? 0)))s · structure \(r.lint.score)/100"
+                  + (r.critique.map { " · review \($0.issues.count) issues" } ?? ""))
+            if r.endedBy == .timedOut { print("ended: time limit — later stages skipped, prompt kept") }
             print("tokens \(client.usage.summary)" + (cost.map { String(format: " · $%.5f", $0) } ?? ""))
-            print("gate: " + (lint.isClean ? "PASS" : "FAIL — " + lint.issues.map(\.title).joined(separator: "; ")))
+            print("gate: " + (r.lint.isClean ? "PASS" : "FAIL — " + r.lint.issues.map(\.title).joined(separator: "; ")))
             print("───────────────────────────────────────────────────")
-            print(prompt)
-            if let suite, !suite.cases.isEmpty {
+            print(r.prompt)
+            if let suite = r.tests, !suite.cases.isEmpty {
                 print("")
                 print(suite.markdown)
             }
 
             if let path = c.outPath {
-                // The prompt and its tests are separate deliverables. Appending the suite to the
-                // prompt file yields something you cannot paste into a system slot.
-                try prompt.write(toFile: path, atomically: true, encoding: .utf8)
+                // The prompt and its tests are separate deliverables.
+                try r.prompt.write(toFile: path, atomically: true, encoding: .utf8)
                 print("\nwrote \(path)")
-                if let suite {
+                if let suite = r.tests {
                     let testsPath = (path as NSString).deletingPathExtension + ".tests.md"
                     try suite.markdown.write(toFile: testsPath, atomically: true, encoding: .utf8)
                     print("wrote \(testsPath)")
@@ -269,46 +224,27 @@ public enum E2E {
                     "calls": calls,
                     "tokens_in": client.usage.inputTokens,
                     "tokens_out": client.usage.outputTokens,
-                    // `null`, not -1: a sentinel that looks like a measurement gets averaged by
-                    // the next script that reads this file. No price flags means the cost was
-                    // never computed, which is an absence, not a negative number.
+                    // `null`, not -1: no price flags means the cost was never computed.
                     "cost_usd": cost.map { $0 as Any } ?? NSNull(),
-                    "structure": lint.score,
-                    "rubric": critique.map { $0.total(for: c.target) as Any } ?? NSNull(),
-                    "clean": lint.isClean,
-                    "issues": lint.issues.map { ["id": $0.id, "severity": $0.severity.rawValue, "title": $0.title] },
-                    // Reduced, not `uniqueKeysWithValues`: a stage stamped twice would trap, and
-                    // the harness exists to report failures rather than become one.
-                    "stages": stageTimes.reduce(into: [String: Double]()) { $0[$1.0] = $1.1 },
+                    "structure": r.lint.score,
+                    "review_issues": r.critique.map { $0.issues.count as Any } ?? NSNull(),
+                    "timed_out": r.endedBy == .timedOut,
+                    "clean": r.lint.isClean,
+                    "issues": r.lint.issues.map { ["id": $0.id, "severity": $0.severity.rawValue, "title": $0.title] },
+                    "stages": stageTimes,
                 ]
                 if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
                     try? data.write(to: URL(fileURLWithPath: c.outPath.map { $0 + ".json" } ?? "e2e-result.json"))
                 }
             }
-            return lint.isClean ? 0 : 1
+            return r.lint.isClean ? 0 : 1
         } catch {
-            // A failed run still spent tokens. Reporting the error without the spend hides the
-            // only number that matters when a stage is failing repeatedly.
-            if calls > 0 || client.usage.inputTokens > 0 {
+            // A failed run still spent tokens; report the spend with the error.
+            if client.usage.inputTokens > 0 {
                 FileHandle.standardError.write(Data("spent: \(client.usage.summary)\n".utf8))
             }
             return bail(error.localizedDescription)
         }
-    }
-
-    /// The re-check line.
-    ///
-    /// Two rubric scores printed next to each other are an invitation to subtract them, and the
-    /// difference is usually inside the critic's own spread. `RubricNoise` decides whether the gap
-    /// is reportable, so the log stops handing the reader a regression that is not there.
-    private static func reverified(_ c: Critique?, was before: Int?, target: PromptTarget) -> String {
-        guard let c else { return "unparseable" }
-        let after = c.total(for: target)
-        var line = "\(c.verdict), rubric \(after)/100"
-        if let before {
-            line += " (was \(before) — \(RubricNoise.delta(from: before, to: after).note))"
-        }
-        return line
     }
 
     private static func log(_ stage: String, _ message: String) {

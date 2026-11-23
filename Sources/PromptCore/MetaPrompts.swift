@@ -77,8 +77,8 @@ public enum MetaPrompts {
             .enumerated()
             .map { index, pair in "\(index + 1). \(pair.0.title). \(pair.1)" }
         return """
-        One principle per rubric axis. The critic scores you on exactly these \(lines.count), so a \
-        prompt that satisfies them is a prompt that passes.
+        \(lines.count) principles. A prompt that satisfies them passes review; write for the task, not \
+        for the list.
 
         \(lines.joined(separator: "\n\n        "))
         """
@@ -141,69 +141,51 @@ public enum MetaPrompts {
 
     // MARK: - Stage 1: diagnose
 
+    /// The clarifier. It replaced a diagnostic stage that scored all twelve axes with a written
+    /// justification each: a long JSON reply whose only consumer was the writer's weak-axis list.
+    /// What measurably helps a strong model is the *missing information* (BPO, arXiv 2311.04155,
+    /// and its scale study, arXiv 2505.08303: restyling a prompt gains ~0 on large models), so this
+    /// stage asks for exactly that: what is missing, what to ask, and what to assume.
     public static func analyzer(target: PromptTarget) -> String {
         """
-        You are the diagnostic stage of a prompt compiler. You receive a rough request that someone \
-        intends to hand to an AI model or agent. You work out what is missing before it is written.
+        You read a rough request that someone will turn into a prompt for an AI model or agent, and \
+        work out what is missing before it is written. You do not carry out the request and you do \
+        not write the prompt.
 
-        You do not carry out the request. You do not write the prompt. Your output is a judgement plus \
-        a short list of questions.
-
-        \(diagnosticRubricBlock(for: target))
-
-        \(defectBlock)
-
-        <how_to_judge>
-        - Score the draft as written, not the draft you would have written. A one-line request scores 0 or 1 \
-        on most axes; that is the correct answer, not a failure.
-        - A finding needs a quote from the draft. If you cannot quote it, it is not a finding.
-        - Severity: blocker = the result would be wrong or unusable; major = the result would need rework; \
-        minor = polish.
-        - Contradictions outrank vagueness. A prompt with two rules that cannot both be followed is worse \
-        than a vague one, because the executor burns effort reconciling them. Hunt for those pairs.
-        - Do not fault the draft for what its medium does not need. A chat message does not need autonomy \
-        rules; a system prompt does not need a file path.
-        - Reward what is already good. A draft that states its output format does not need a question \
-        about format.
-        </how_to_judge>
+        <what_to_find>
+        At most five gaps that would most change the result: a missing goal or audience, no output \
+        format or length, no way to tell success, an unstated input, two requirements that cannot \
+        both hold. Quote the draft for each. Contradictions outrank vagueness. Do not fault the draft \
+        for what its medium does not need: a chat message needs no autonomy rules.
+        </what_to_find>
 
         <how_to_ask>
-        - Ask only when the answer would change the prompt AND no defensible default exists. If a default \
-        exists, do not ask: say it in "assumptions" and let the writer record it.
-        - At most 4 questions, most consequential first. Zero is the right answer when the draft is clear.
-        - Never ask what the draft already states, and never ask what the user profile already answers.
-        - Each question is answerable in a few words, with 2-4 concrete options when the answers are \
-        predictable, plus the "default" you would choose if it goes unanswered.
-        - Never ask the user to do your job ("what should the success criteria be?"). Ask for the fact \
-        that determines it ("is this for an internal demo or a paying client?").
+        - Ask only when the answer would change the prompt AND no defensible default exists. If a \
+        default exists, put it in "assumptions" instead.
+        - At most 4 questions, most consequential first. Zero is the right answer for a clear draft.
+        - Never ask what the draft or the user profile already answers.
+        - Each question is answerable in a few words, with 2-4 options when answers are predictable, \
+        and the "default" you would pick if it goes unanswered.
+        - Ask for the fact that decides something ("internal demo or paying client?"), never for the \
+        decision itself ("what should the success criteria be?").
         </how_to_ask>
 
         <task_type>
-        Classify the request as one of: research, writing, code, analysis, design, planning, operations, \
-        other. Set "risk" to high when the work could touch money, personal data, production systems, \
-        legal exposure or anything visible to third parties; medium when it writes files or sends \
-        anything; low otherwise. The writer uses risk to decide how much escalation detail to include.
+        task_type is one of: research, writing, code, analysis, design, planning, operations, other. \
+        risk is high when the work could touch money, personal data, production systems, legal \
+        exposure or third parties; medium when it writes files or sends anything; low otherwise.
         </task_type>
 
-        Write "brief", the analysis and the questions in the language of the draft.
-
-        Reply with JSON only. No prose, no code fence. Key order matters: findings before scores.
+        Write every string in the language of the draft. Reply with JSON only, no prose, no fence:
         {
-          "brief": "2-4 sentences: what the user wants, and the two or three things that would most change the result",
-          "task_type": "research|writing|code|analysis|design|planning|operations|other",
-          "risk": "low|medium|high",
-          "findings": [
-            {"code": "D02", "severity": "blocker", "quote": "exact words from the draft", "fix": "what to add or change, one sentence"}
-          ],
-          "scores": {
-            "goal": {"note": "why this score, quoting or pointing at the draft", "score": 1}
-          },
-          "questions": [
-            {"question": "short, concrete", "why": "what the answer changes", "options": ["...", "..."], "default": "the answer you would assume"}
-          ],
-          "assumptions": ["defaults you would apply if the user says nothing"]
+          "brief": "2-3 sentences: what the user wants and what would most change the result",
+          "task_type": "writing",
+          "risk": "low",
+          "findings": [{"code": "D02", "severity": "major", "quote": "exact words from the draft", "fix": "one sentence"}],
+          "questions": [{"question": "short", "why": "what the answer changes", "options": ["a", "b"], "default": "a"}],
+          "assumptions": ["a default you would apply if the user says nothing"]
         }
-        Include a score entry for every axis listed in the rubric.
+        Finding codes: \(Defect.all.prefix(12).map { "\($0.code) \($0.title)" }.joined(separator: "; ")).
         """
     }
 
@@ -364,54 +346,39 @@ public enum MetaPrompts {
 
     // MARK: - Stage 3: verify
 
+    /// The reviewer (Deep only). Issues with quotes, no per-axis scores: the score was a weighted
+    /// mean of twelve judgements that moved 17 points between identical runs (see `RepairGuard`),
+    /// while the quoted issues are what the repair stage actually consumes.
     public static func critic(target: PromptTarget) -> String {
-        """
-        You are the verification stage of a prompt compiler. You did not write this prompt and you owe it \
-        nothing. Your job is to find the defects that will actually cost the user a bad result.
+        let checklist = Axis.applicable(to: target).map { "- \($0.rawValue): \($0.question)" }
+            .joined(separator: "\n")
+        return """
+        You review a prompt someone else wrote. Find the defects that will cost the user a bad result, \
+        and nothing else.
 
-        \(rubricBlock(for: target))
+        <checklist>
+        \(checklist)
+        </checklist>
 
-        \(defectBlock)
+        <passes>
+        - Contradictions: collect the rules that constrain the same action and check each pair. Two \
+        rules that cannot both be followed are a blocker.
+        - Fabrication: every number, name, URL, date and citation is either in the original request \
+        or listed under Assumptions. Anything else asserted as fact is a blocker.
+        - Criteria: each success criterion can be checked by someone else, with a method the executor \
+        has. Report a failure as one issue on the criteria axis.
+        - Performing: if the prompt contains the finished deliverable instead of instructions, that \
+        is a blocker.
+        - Medium: a chat message with autonomy sections is padded; an agent prompt with no \
+        verification is under-specified.
+        </passes>
 
-        <rules>
-        - Quote the exact text for every issue. No quote, no issue.
-        - A blocker is something that makes the prompt fail on a normal input. A major is something that \
-        forces rework. A minor is polish. Report minors sparingly.
-        - Do not reward length. A tight prompt that covers the axes beats a long one that repeats itself.
-        - Run the contradiction pass explicitly: collect the rules that constrain the same action, then \
-        check each pair. Two rules that cannot both be followed are blockers even when each looks sensible \
-        alone. Resolve them by naming the priority, not by deleting one.
-        - Run the criteria pass: for each success criterion, ask two things at once — could a second \
-        person run it and get a yes or no, and does the executor have the tool or observation to check \
-        it? A contrast ratio, a benchmark or a "user finds it clear" with no named method fails both. \
-        Report that as ONE issue on the criteria axis (D18), not two: one flaw, one repair.
-        - Run the fabrication pass: every number, name, URL, date, count and citation in the prompt is \
-        either supplied by the request or listed under Assumptions. Anything asserted as given fact that \
-        was not given is a blocker (D17). This is the failure this tool exists to prevent, so check it \
-        even when the prompt reads well.
-        - Run the contract pass: does the output contract pin format, structure, length with a number, \
-        language, and at least one exclusion? A short task may pin fewer; what it pins is not left to \
-        chance.
-        - Check the medium: a chat message with autonomy sections is padded; an agent prompt with no \
-        verification is under-specified; a system prompt tied to one scenario is not reusable.
-        - Check that the prompt instructs rather than performs. If it contains the finished deliverable, \
-        that is a blocker.
-        - Ignore taste. Report nothing you would not defend to the author.
-        </rules>
+        Blocker = fails on a normal input. Major = forces rework. Minor = polish; report at most two. \
+        Quote the exact text for every issue; no quote, no issue. Ignore taste. At most six issues.
 
-        Reply with JSON only. No prose, no fence. Key order matters: issues before scores.
-        {
-          "verdict": "ship|repair",
-          "summary": "one or two sentences a busy user can act on",
-          "issues": [
-            {"axis": "criteria", "code": "D02", "severity": "blocker", "quote": "exact text", "problem": "why it fails", "fix": "the replacement text or the change to make"}
-          ],
-          "strengths": ["what is already working, one line each, at most three"],
-          "scores": {"goal": {"note": "why", "score": 3}}
-        }
-        Use "repair" when any issue is a blocker or major. Include a score entry for every axis.
-        Every issue carries the defect code from the list above, so the repair stage knows which
-        rule it is answering.
+        Reply with JSON only, no prose, no fence:
+        {"verdict": "ship|repair", "summary": "one sentence", "issues": [{"axis": "criteria", "severity": "major", "quote": "exact text", "problem": "why it fails", "fix": "the replacement text"}]}
+        Use "repair" when any issue is a blocker or major.
         """
     }
 

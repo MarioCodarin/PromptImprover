@@ -57,31 +57,12 @@ struct QualityPanel: View {
 
     private var scores: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // The review reports quoted issues, not a score: a weighted mean of twelve model
+            // judgements moved 17 points between identical runs, so it is no longer computed.
             if let c = vm.critique {
-                // Labelled as a rubric score, not a quality percentage: the two 0-100 numbers on
-                // this panel come from different instruments and one blocker costs each of them a
-                // different amount.
-                ScoreRow(label: "Rubric", value: c.total(for: vm.runTarget), suffix: "/100", lead: true,
-                         help: "Weighted mean of the twelve axes the critic scored. The critic's own "
-                             + "run-to-run spread on identical text is \(RubricNoise.measuredSpread) "
-                             + "points, so treat this as a band and compare it with nothing.")
-                // A missing axis silently scores the generic 2, so the number above is part
-                // assumption. Naming them is the difference between a score and a guess.
-                let absent = c.missingAxes(for: vm.runTarget)
-                if !absent.isEmpty {
-                    Text("Scored without: " + absent.map(\.title).joined(separator: ", "))
-                        .font(.meta).foregroundStyle(.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                // The part of the score a reader can act on. Twelve per-axis marks survive the
-                // critic's noise far better than their weighted mean does, and naming them turns
-                // "73" into "73, and here is what is dragging it".
-                let weak = c.weakestAxes(for: vm.runTarget)
-                if !weak.isEmpty {
-                    Text("Below the bar: " + weak.map(\.title).joined(separator: ", "))
-                        .font(.meta).foregroundStyle(.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(c.issues.isEmpty ? "Review: no defects found"
+                                      : "Review: \(c.issues.count) issue\(c.issues.count == 1 ? "" : "s") found")
+                    .font(.ui)
             }
             if let l = vm.lint {
                 ScoreRow(label: "Structure", value: l.score, suffix: "/100",
@@ -92,7 +73,17 @@ struct QualityPanel: View {
                 Text("Working: " + c.strengths.joined(separator: " · "))
                     .font(.meta).foregroundStyle(.secondary)
             }
-            // Cost is part of the result: a Deep run is five or six calls, and that is a decision.
+            // Standard repairs from the linter alone, so the outcome is shown with or without a review.
+            if let note = repairNote {
+                Text(note).font(.meta).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if vm.timedOut {
+                Text("The run reached its time limit. The prompt is complete; the stages after it did not run.")
+                    .font(.meta).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // Cost is part of the result.
             Text("\(vm.calls) model call\(vm.calls == 1 ? "" : "s") · \(String(format: "%.1f", vm.elapsed))s · \(vm.tokensIn) in / \(vm.tokensOut) out")
                 .font(.figure)
                 .foregroundStyle(.tertiary)
@@ -113,10 +104,6 @@ struct QualityPanel: View {
                          title: "\(issue.axis) · \(issue.problem)",
                          detail: issue.quote.isEmpty ? issue.fix : "\u{201C}\(issue.quote)\u{201D} → \(issue.fix)")
             }
-            if c.needsRepair, let note = repairNote {
-                Text(note).font(.meta).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 
@@ -124,7 +111,7 @@ struct QualityPanel: View {
     /// reads "repair" may have been repaired once already, or had its repair thrown away.
     private var repairNote: String? {
         switch vm.repairOutcome {
-        case .applied: return "One repair pass was applied. What is listed above survived it — refine if you want it changed."
+        case .applied: return "One repair pass was applied. Review issues, if any, describe the text before it — refine if you want more changed."
         case .reverted:
             // Name the reason: "discarded" alone leaves the user unable to tell a model failure
             // from the guard working correctly.

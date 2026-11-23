@@ -7,14 +7,15 @@ Write what you want in a few words. The app reads it, asks a few short questions
 ## Features
 
 - **A bar above the Dock.** There is no Dock icon and no main window. Click the menu bar icon and a dark prompt bar opens just above the Dock, centred on the screen you're using. Questions, progress and the result stack *above* the bar, which stays put while the panel grows upward. **Expand** opens the full prompt so you can read, refine and copy it. Clicking elsewhere hides the bar, except while a prompt is being written or questions are waiting for answers.
-- **Six stages, one gate.**
-  1. *Diagnose* — scores the draft 0–4 on a fixed rubric (12 axes; 11 for a chat message, which drops autonomy), lists defects by code (`D02` = no success criteria), and asks up to 4 questions — only when no defensible default exists. Zero questions is normal.
-  2. *Write* — compiles the brief into an executable prompt, streaming as it goes.
-  3. *Lint* — 19 deterministic structural checks for an agent task, 17 for a system prompt, 15 for a chat message, offline and free: missing sections, unmeasurable criteria, two output formats at once, two different length limits, chat preamble, code fences, shouted rules, unanswered questions with no assumptions recorded.
-  4. *Verify* — an independent reviewer quotes every defect it finds and scores the result against the full 0/2/4 anchor set. (The writer is given the same twelve axes as prose principles without the numbers — it should write for the task, not for the rubric.) Anything blocker or major triggers a repair pass.
-  5. *Repair* — rewrites only the lines the issues implicate, then the result is judged on **what changed**, not on its score: a repair that introduces a blocker, or that leaves more majors than it fixed, is discarded and the original kept — and a repair that closes a real defect while losing a few points of a noisy aggregate is kept. The repaired prompt is re-scored once, so the number you see describes the text you copy.
-  6. *Tests* (Deep) — 3–5 acceptance cases, each one something a weak prompt fails, plus a checklist for judging the output.
-- **Three depths.** Fast = one call, write only. Standard = diagnose, write, lint, verify, repair, re-score. Deep = adds acceptance tests. The lint gate runs in every mode.
+- **One write, one gate, at most one fix.** The flow follows what the research says pays off on a strong model (sources under *How the prompt engineering works*):
+  1. *Clarify*: lists what the draft is missing, with quotes, and asks up to 4 questions, but only when no defensible default exists. Zero questions is normal. Unanswered questions become recorded assumptions.
+  2. *Write*: compiles the draft, the answers and the defaults into an executable prompt, streaming as it goes.
+  3. *Lint*: 19 deterministic structural checks for an agent task, 17 for a system prompt, 15 for a chat message. Offline, free, and the same answer every time.
+  4. *Repair* (only on a blocker or major): one targeted rewrite fed the quoted findings. It is kept only if it doesn't introduce a blocker or leave more majors than it fixed. Otherwise the original stays.
+  5. *Review* (Deep): an independent reviewer quotes defects the linter can't see, such as fabricated facts, contradictions and a prompt that performs the task instead of instructing it. Its blockers and majors feed the same single repair.
+  6. *Tests* (Deep): 3–5 acceptance cases, each one something a weak prompt fails, plus a checklist for judging the output.
+- **Three depths.** Fast = 1 call (write). Standard = 2–3 calls (clarify, write, repair if needed). Deep = 4–5 calls (adds review and tests). The lint gate runs in every mode.
+- **Time limits.** Every run has a budget: 60 s Fast, 150 s Standard, 300 s Deep. A stream that sends nothing for 45 s is cut and retried. Each stage has its own output ceiling, and the JSON stages ask for low reasoning effort. When the budget runs out, you get the finished prompt you already have, marked "time limit reached", never a spinner.
 - **Three targets.**
   - **Agent task:** for Claude Code, Codex, OpenCode and similar tools. Adds autonomy rules, persistence, a verification step and a final report.
   - **System prompt:** a reusable system prompt.
@@ -100,7 +101,16 @@ Each target gets its own worked example, in its own shape. One exemplar served a
 
 Two structural choices matter more than any single rule:
 
-1. **The rubric is one object, rendered per consumer.** `Axis` (12 axes, 11 for a chat message, each with a 0/2/4 anchor) is the single source, and each stage is handed only the slice it needs: the **critic** gets the full anchor set, because it has to place a score; the **analyzer** gets just the `generic (2)` boundary per axis, because all it decides is 2-or-worse versus 3; the **writer** gets the same twelve axes as prose principles with no numbers, because a writer aiming at "4 on economy" writes for the rubric instead of for the task; and the **repair brief** gets only the named axis per issue. One object, four renderings, so a change to an anchor reaches every stage that should see it and none that shouldn't.
+Why the pipeline is shaped this way, with GitHub stars as of 2026-11:
+
+| Source | What it showed | What it changed here |
+|---|---|---|
+| BPO (thu-coai, [arXiv 2311.04155](https://arxiv.org/abs/2311.04155)); scale study [arXiv 2505.08303](https://arxiv.org/abs/2505.08303) | Rewriting a user prompt gains ≈0 on large models | Value comes from *missing information*, so clarify stays and restyling passes go |
+| GEPA (gepa-ai/gepa, 7.5k ★, [arXiv 2507.19457](https://arxiv.org/abs/2507.19457)) | One rewrite driven by concrete textual feedback beats blind search | Repair is fed quoted lint/review findings, not a score |
+| Self-Refine (madaan/self-refine, [arXiv 2303.17651](https://arxiv.org/abs/2303.17651)) | Most of the gain is in the first feedback→refine round | At most one repair; the re-verify loop was removed |
+| DSPy (stanfordnlp/dspy, 39k ★), PromptWizard (microsoft, 4k ★), TextGrad (zou-group, 3.8k ★) | Optimisers need a trainset and a metric | Not applicable to one draft with no data; borrowed typed stages and parse-repair only |
+
+1. **The rubric is one object, rendered per consumer.** `Axis` (12 axes, 11 for a chat message, each with a 0/2/4 anchor) is the single source, and each stage is handed only the slice it needs: the **reviewer** gets each axis's question as a checklist, and quotes issues rather than placing scores (a weighted mean of twelve model judgements moved 17 points between identical runs); the **writer** gets the same twelve axes as prose principles with no numbers, because a writer aiming at "4 on economy" writes for the rubric instead of for the task; and the **repair brief** gets only the named axis per issue. One object, three renderings, so a change to an anchor reaches every stage that should see it and none that shouldn't.
 2. **The model is never the only judge.** The linter is deterministic and catches the failures a model will happily wave through: a prompt with no success criteria, two contradictory length limits, a reply wrapped in a code fence. A prompt that fails the linter is marked as failing even when the critic says "ship".
 
 A linter is only worth having if it is believed, so the governing rule is that **a false positive is worse than a miss**. A wrong verdict costs a repair call and teaches the operator to ignore the panel. Every check is therefore written to fire on the defect and nothing near it: a section counts whether it is a `#` heading, a bold line, a `- Label:` bullet or plain chat prose; a quoted phrase is the prompt *talking about* language rather than using it; `STRIPE_SECRET_KEY` is an identifier, not shouting.
@@ -109,32 +119,39 @@ The risk in that direction is the opposite one — a check narrowed until it nev
 
 ## Project layout
 
+The logic is a library target, `PromptCore`, with no SwiftUI or AppKit. The app is a thin UI over it.
+
 ```
-Sources/PromptImprover/
-├── PromptImproverApp.swift   MenuBarExtra + Settings scenes, menu bar icon, CLI hooks (--selftest, --lint, --e2e, --vm, --dump-prompts)
-├── ContentView.swift         PanelView: composer, questions, preview/expanded result, feedback
-├── QualityPanel.swift        Rubric/structure scores, critic issues, linter findings, acceptance tests
-├── SettingsView.swift        General (depth) · Profile · Endpoints · Feedback tabs
-├── ImproverViewModel.swift   Stage orchestration, questions, cancellation via run IDs, repair regression guard
-├── PromptEngine.swift        The five stages as network calls — diagnose/write/verify/repair/tests — plus revise for Refine
-├── Rubric.swift              The standard: 12 axes with 0/2/4 anchors, target weights, defect taxonomy
+Sources/PromptCore/           — the pipeline, importable on its own
+├── Pipeline.swift            PromptPipeline: the only orchestration (clarify → write → lint → review → repair → tests), as an event stream
+├── Budget.swift              Deadline, stall timeout, per-stage output ceilings and effort
+├── PromptEngine.swift        One model call per stage, plus revise for Refine
+├── LLMClient.swift           LLMTransport protocol; both wire formats, SSE, stall watchdog, retry within budget, parameter fallback
+├── Endpoint.swift            Endpoint value type and presets
+├── MetaPrompts.swift         Every meta-prompt and the brief composer
+├── Rubric.swift              12 axes, target weights, defect taxonomy
 ├── PipelineModel.swift       What flows between stages: Finding, Diagnosis, Critique, EvalSuite, Rigor
 ├── PromptTarget.swift        The three targets: skeleton, guidance, length aim, few-shot exemplar
 ├── PromptLinter.swift        Lint entry point, report, issue→axis mapping, shared text helpers
-├── LinterChecks.swift        The structural checks, one function each, over one LintContext (19 / 17 / 15 per target)
-├── MetaPrompts.swift         Every meta-prompt and the brief composer
+├── LinterChecks.swift        The structural checks, one function each (19 / 17 / 15 per target)
 ├── ResponseParsing.swift     Tolerant JSON extraction, reasoning-block stripping, fence removal
-├── RepairGuard.swift         Whether a repair is kept: what changed, not what it scored
-├── LLMClient.swift           Both wire formats, SSE streaming, retry with backoff, parameter fallback, truncation detection
-├── Endpoints.swift           Endpoint model, presets, EndpointStore, Keychain wrapper
+├── RepairGuard.swift         Which issues trigger a repair, and whether it is kept
+├── SelfTest.swift            Offline checks + --lint / --dump-prompts
+└── E2E.swift                 Headless pipeline run with a stage trace (--e2e)
+Sources/PromptImprover/       — the macOS app
+├── PromptImproverApp.swift   MenuBarExtra + Settings scenes, menu bar icon, CLI hooks
+├── ImproverViewModel.swift   Pipeline events → published UI state; cancel and restore rules
+├── ContentView.swift         PanelView: composer, questions, preview/expanded result, feedback
+├── QualityPanel.swift        Structure score, review issues, repair outcome, linter findings, tests
+├── SettingsView.swift        General (depth) · Profile · Endpoints · Feedback tabs
+├── Endpoints.swift           EndpointStore, Keychain wrapper
 ├── Profile.swift             UserProfile, feedback tags, learned preferences
-├── SelfTest.swift            191 offline checks + --lint / --dump-prompts
-├── E2E.swift                 Headless pipeline run with a stage trace (--e2e)
-├── VMProbe.swift             Headless driver for the view model: restore, cancel mid-verify, depth (--vm)
+├── VMProbe.swift             Headless driver for the view model: restore, cancel mid-repair/review, depth (--vm)
+├── QuickBar*.swift           The bar above the Dock
 ├── LoginItem.swift           SMAppService open-at-login
 └── Logo.swift                LogoMark (SwiftUI) + .icns renderer
 Tests/
-├── mock_llm.py               Mock provider: SSE, both wire formats, ten failure modes, deterministic per run
+├── mock_llm.py               Mock provider: SSE, both wire formats, twelve failure modes (incl. stall and drip), deterministic per run
 └── run_tests.sh              The whole gate: self-tests + every pipeline path
 build.sh                      SwiftPM build → self-test → .app bundle (LSUIElement, icon, ad-hoc codesign)
 ```
@@ -216,7 +233,7 @@ The last two pairs are the interesting ones: `/polish/` and `/fabricate/` hold t
 - `ImproverViewModel` owns interaction; `PromptEngine` owns model calls. Keep it that way: anything that touches the network belongs in the engine, or `--e2e` stops covering it.
 - The linter only contains checks where a string test is *sound*. Semantic contradictions are left to the critic on purpose — a word-overlap heuristic flags "always run the tests" against "never commit without running tests" and calls agreement a conflict.
 - `Rigor.fast` skips the diagnosis stage entirely. `askQuestions` never skips it: the toggle controls whether the run *stops* for answers, not whether stage 1 happens, because the analyzer's output is the writer's defect list, task type and risk.
-- A repair is judged on **what changed**, not on the weighted score. Only blockers and majors can veto a repair; minors never do, because the critic re-scores the shipped text anyway. `RepairGuard` is the single home for that policy, and both the app and `--e2e` call it — they had drifted apart when the policy lived in two places.
+- A repair is judged on **what changed**, not on the weighted score. Only blockers and majors can veto a repair; minors never do, because a repair is never run for polish. `RepairGuard` holds that policy and `PromptPipeline` is the only caller: the app and `--e2e` both consume the same pipeline, so they cannot drift.
 - **The rubric number is not a regression signal.** Four runs on one target with one draft and one model scored the final text 90, 80, 84 and 73 — a 17-point spread from the critic's own variance. A repair that drops 18 points is one sample from that distribution, which is why the guard judges on the issue list and not on the score. Do not add a score threshold; it will fire on noise. The spread lives in `RubricNoise.measuredSpread`, and anything that compares two scores — the harness's repair trace today — goes through `RubricNoise.delta`, which reports a gap inside the spread as no change rather than as a small win or a small regression. The panel shows the number without inviting the comparison, and names the axes the critic actually marked down, because twelve per-axis marks survive that noise far better than their weighted mean.
 - A prompt the gate already passes is only sent to repair when the critic found something *unusable*. Polish has nothing to aim at, so the model rewrites for the sake of rewriting: a live run took a 100/100 prompt and returned 97/100, accepted because minors never veto. A critic blocker or major still repairs a clean prompt — that is the fabrication the linter cannot see, and skipping it would ship the one failure this tool exists to prevent. Two mock modes pin the pair in opposite directions: `/polish/` must spend no call, `/fabricate/` must repair.
 - The linter's issue→axis table is keyed on the ids the checks actually emit. It has been wrong twice (once on a registry label, once on single-word section names while the sections are `"output contract"` and `"success criteria"`), and both times every section blocker reported `consistency`, so a repair was sent looking for a contradiction. A self-test builds the id list from `requiredSections` so renaming a section cannot unmoor its axis.
