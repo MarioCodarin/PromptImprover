@@ -30,14 +30,15 @@ public struct Budget: Sendable {
     public var remaining: TimeInterval { max(0, deadline.timeIntervalSinceNow) }
     public var isExpired: Bool { remaining <= 0 }
 
-    /// Defaults per depth. Sized for a reasoning model on a busy gateway, not for a best case:
+    /// Time allowed after the prompt is written, for review, repair and tests. The write itself is
+    /// not counted (see `PromptPipeline.writeCap`). Sized for a reasoning model on a busy gateway:
     /// a deadline that fires on ordinary runs teaches the user to ignore it.
     public static func `for`(_ rigor: Rigor, from start: Date = Date()) -> Budget {
         let seconds: TimeInterval
         switch rigor {
         case .fast: seconds = 60
-        case .standard: seconds = 150
-        case .deep: seconds = 300
+        case .standard: seconds = 180
+        case .deep: seconds = 360
         }
         return Budget(deadline: start.addingTimeInterval(seconds))
     }

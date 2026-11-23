@@ -95,9 +95,21 @@ public struct PromptPipeline {
     /// The questions and defaults, before anything is written. Separate from `compose` so the
     /// caller can show the questions without the pipeline holding a suspended run open; the write
     /// budget starts when writing does, not while the user is typing answers.
-    public func clarify(budget: Budget = Budget(deadline: Date().addingTimeInterval(60))) async throws -> Diagnosis {
-        try await engine.diagnose(budget: budget)
+    ///
+    /// Running out of time here is not a failure: the writer works without a diagnosis (Fast
+    /// always does), so a slow clarify degrades to "no questions" instead of ending the run.
+    public func clarify(budget: Budget = Budget(deadline: Date().addingTimeInterval(90))) async throws -> Diagnosis {
+        do {
+            return try await engine.diagnose(budget: budget)
+        } catch LLMError.deadline {
+            return .empty
+        }
     }
+
+    /// The write is the one call a run cannot do without, so it is not held to the depth budget:
+    /// at reasoning effort "max" a model can think for minutes before its first word, and cutting
+    /// it off left the user with nothing. Only the stall limits and this hard cap apply.
+    static let writeCap: TimeInterval = 600
 
     // MARK: - Stages 2-5: write, lint, review, repair, tests
 
@@ -105,10 +117,13 @@ public struct PromptPipeline {
     ///   - diagnosis: from `clarify`, or nil when the depth skips it.
     ///   - questions: the clarify questions with whatever the user answered.
     ///   - priorCalls: calls already spent on this run (the clarify call), so the total is honest.
+    ///   - budget: one budget for every call, write included (the harness uses this to test the
+    ///     limits). When nil, the write runs under `writeCap` and the depth budget is the time
+    ///     allowed *after* a prompt exists, for review, repair and tests.
     public func compose(diagnosis: Diagnosis?, questions: [ClarifyingQuestion] = [],
-                        priorCalls: Int = 0, budget: Budget? = nil) -> AsyncThrowingStream<Event, Error> {
+                        priorCalls: Int = 0, budget fixed: Budget? = nil) -> AsyncThrowingStream<Event, Error> {
         let started = Date()
-        let budget = budget ?? .for(request.rigor, from: started)
+        let writeBudget = fixed ?? Budget(deadline: started.addingTimeInterval(Self.writeCap))
         let unanswered = questions.filter { $0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
         let brief = MetaPrompts.composeBrief(draft: request.draft, diagnosis: diagnosis ?? .empty, questions: questions)
 
@@ -132,7 +147,10 @@ public struct PromptPipeline {
                 do {
                     // Write. A deadline here has nothing to fall back on, so it is an error.
                     out.yield(.stage(.write))
-                    let written = try await streamed(engine.write(brief: brief, budget: budget), into: out)
+                    let written = try await streamed(engine.write(brief: brief, budget: writeBudget), into: out)
+                    // From here on a finished prompt exists, so the rest is optional work with a
+                    // fixed allowance that starts now.
+                    let budget = fixed ?? .for(request.rigor)
                     calls += 1
                     let text = PromptEngine.finalize(written)
                     guard !text.isEmpty else { throw LLMError.api("The model returned an empty response.") }

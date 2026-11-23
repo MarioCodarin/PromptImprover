@@ -132,9 +132,14 @@ public enum E2E {
                                                      model: c.model, profile: nil),
                                       transport: client)
         let started = Date()
-        var budget = Budget.for(c.rigor, from: started)
-        if let d = c.deadline { budget.deadline = started.addingTimeInterval(d) }
-        if let s = c.stall { budget.stallTimeout = s }
+        // The app's budget unless a flag overrides it; an override applies to every call.
+        var fixed: Budget?
+        if c.deadline != nil || c.stall != nil {
+            var b = Budget.for(c.rigor, from: started)
+            if let d = c.deadline { b.deadline = started.addingTimeInterval(d) }
+            if let s = c.stall { b.stallTimeout = s }
+            fixed = b
+        }
 
         var calls = 0
         var stageTimes: [String: Double] = [:]
@@ -150,7 +155,8 @@ public enum E2E {
             var questions: [ClarifyingQuestion] = []
             if c.rigor.verifies {
                 stamp("clarify")
-                let d = try await pipeline.clarify(budget: budget)
+                let d: Diagnosis
+                if let fixed { d = try await pipeline.clarify(budget: fixed) } else { d = try await pipeline.clarify() }
                 calls += 1
                 diagnosis = d
                 log("clarify", "\(d.findings.count) findings, \(d.questions.count) questions, risk \(d.risk)")
@@ -166,7 +172,7 @@ public enum E2E {
             var result: PromptPipeline.Result?
             var sawRepair = false
             for try await event in pipeline.compose(diagnosis: diagnosis, questions: questions,
-                                                    priorCalls: calls, budget: budget) {
+                                                    priorCalls: calls, budget: fixed) {
                 switch event {
                 case .stage(let s):
                     stamp(s.rawValue)
