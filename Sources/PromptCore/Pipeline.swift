@@ -314,7 +314,8 @@ public struct PromptPipeline {
     /// of the rewrite arrived — anything from nothing to all but the last line. `lint` scores text.
     static func afterRepairCutOff(before: Candidate, partial: String,
                                   lint: (String) -> PromptLinter.Report) -> Candidate {
-        // TODO(human): decide what the user gets when time runs out during a repair.
+        // Ship the complete, already-linted prompt the repair started from. A cut-off rewrite may
+        // be missing its last section and nothing has verified it, so a partial is never preferred.
         return before
     }
 }

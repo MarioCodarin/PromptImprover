@@ -22,7 +22,7 @@ Write what you want in a few words. The app reads it, asks a few short questions
   - **Chat message:** a compact single message.
 - **Refine.** Ask for changes such as "shorter", "add a table" or "for Claude Code" without starting over.
 - **Any endpoint.** Works with APIs in the OpenAI format (`/chat/completions`) or the Anthropic format (`/messages`).
-  - **Refuseless** is set up by default.
+  - **OpenAI** is set up by default.
   - Presets: OpenAI, Anthropic, OpenRouter, Ollama, or any custom URL.
   - The model list is fetched from `GET /models`.
   - Optional `reasoning_effort` setting.
@@ -35,14 +35,18 @@ Write what you want in a few words. The app reads it, asks a few short questions
 Requires macOS 14+ and a Swift toolchain. The Command Line Tools are enough; Xcode is not needed.
 
 ```sh
+git clone https://github.com/MarioCodarin/PromptImprover.git
+cd PromptImprover
 ./build.sh            # builds ./PromptImprover.app (renders the app icon from the SwiftUI logo)
 ./build.sh --install  # also copies it to /Applications and launches it (recommended for open-at-login)
 ```
 
+There is no prebuilt binary: you build it yourself. The app is ad-hoc signed, not notarized, so it runs on the Mac that built it.
+
 Then:
 
 1. Click the `>_✦` icon in the menu bar → the ✦ on the left of the bar → **Settings…** (⌘,).
-2. In **Endpoints**, paste your API key. Refuseless keys start with `abl_`.
+2. In **Endpoints**, pick a preset (or add your own URL) and paste your API key.
 3. Press **Test & fetch models**.
 4. Optional: fill in **Profile**.
 5. Type an idea in the bar and press **↩**.
@@ -159,7 +163,7 @@ build.sh                      SwiftPM build → self-test → .app bundle (LSUIE
 ## Verifying it
 
 ```sh
-./Tests/run_tests.sh      # 191 offline checks, then 28 pipeline runs against a mock provider
+./Tests/run_tests.sh      # 199 offline checks, then 33 pipeline checks against a mock provider
 ./build.sh                # runs the self-test before bundling; a regression in the prompts fails the build
 ```
 
@@ -169,7 +173,7 @@ Three commands for working on the prompts themselves:
 .build/release/PromptImprover --dump-prompts > before.txt   # all 14 system prompts, in full
 .build/release/PromptImprover --lint my-prompt.md --target "Chat message"
 .build/release/PromptImprover --e2e https://api.example.com/v1 \
-    --key "$KEY" --model glm-5.3-abliterated --rigor Deep --out prompt.md \
+    --key "$KEY" --model "$MODEL" --rigor Deep --out prompt.md \
     --price-in 1 --price-out 2
 ```
 
@@ -177,7 +181,7 @@ Every flag, so nothing has to be found by reading `main`:
 
 | Flag | On | Meaning |
 |---|---|---|
-| `--selftest` | — | run the 191 offline checks, exit non-zero on any failure |
+| `--selftest` | — | run the 199 offline checks, exit non-zero on any failure |
 | `--dump-prompts` | — | print all 14 system prompts in full with a token estimate, so a prompt edit can be read as a diff |
 | `--lint <file>` | — | lint one file, print score and issues, exit 1 if not clean |
 | `--target "…"` | lint, e2e | `Agent task` · `System prompt` · `Chat message`; sets which sections are required |
@@ -242,3 +246,11 @@ The last two pairs are the interesting ones: `/polish/` and `/fabricate/` hold t
 - **A check that keys on a phrase must also read the negation.** `silent-defaults` looked for "assume" to prove a decision was recorded, and "never assume a brand name" satisfied it — the gap-handling instruction the same list exists to exclude, written with the verb the list keys on.
 - **Scope a declaration to its artefact, and scope it the same way everywhere.** A word bound belongs to the artefact named nearest before it, and so does a format: "the summary at least 300 words; the appendix at most 200" is two budgets, not a conflict, and "the summary as JSON, and the appendix as Markdown" is two contracts, not two formats at once. `limits` and `formats` share one helper so they cannot drift apart about what "the same deliverable" means.
 - **An exemption has to be as precise as the thing it exempts.** `executed` exempts a message that *asks* for something, because a prompt may quote the handover phrase it forbids. Adding the bare verb `write` to that list exempted every delivered reply that closed with "write back if you need anything" — so the verb is listed with its objects (`write a`, `write the`, …). A closing pleasantry is not a directive.
+
+## Contributing
+
+Issues and pull requests are welcome. Run `Tests/run_tests.sh` before sending a change; it is the whole gate (offline self-tests plus every pipeline path against the mock provider, no API key needed).
+
+## License
+
+[MIT](LICENSE)

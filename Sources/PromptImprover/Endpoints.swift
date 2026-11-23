@@ -18,7 +18,7 @@ final class EndpointStore: ObservableObject {
            let list = try? JSONDecoder().decode([Endpoint].self, from: data), !list.isEmpty {
             endpoints = list
         } else {
-            endpoints = [.refuseless]
+            endpoints = [.openAI]
         }
         selectedID = d.string(forKey: selectedKey).flatMap(UUID.init) ?? endpoints.first?.id
         keyed = Set(endpoints.map(\.id).filter { Keychain.get($0.uuidString) != nil })
@@ -45,7 +45,7 @@ final class EndpointStore: ObservableObject {
         endpoints.removeAll { $0.id == e.id }
         Keychain.delete(e.id.uuidString)
         setKeyed(e.id, false)
-        if endpoints.isEmpty { _ = add(.refuseless) }   // fresh id, so no stale key can attach to it
+        if endpoints.isEmpty { _ = add(.openAI) }   // fresh id, so no stale key can attach to it
         if selectedID == e.id || !endpoints.contains(where: { $0.id == selectedID }) { selectedID = endpoints.first?.id }
     }
 

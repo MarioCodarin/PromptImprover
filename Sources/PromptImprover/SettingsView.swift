@@ -387,11 +387,6 @@ private struct EndpointEditor: View {
                 }
             } header: {
                 Text("API key")
-            } footer: {
-                if e.baseURL.contains("refuseless") {
-                    Text("Refuseless keys start with abl_. One key works for both OpenAI and Anthropic formats.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
             }
 
             Section("Connection") {

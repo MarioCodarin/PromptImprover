@@ -16,14 +16,8 @@ public struct Endpoint: Codable, Identifiable, Hashable {
     /// nil = don't send. Otherwise sent as `reasoning_effort` (OpenAI format only).
     public var reasoningEffort: String?
 
-    public static let refuseless = Endpoint(
-        name: "Refuseless",
-        baseURL: "https://api.refuseless.com/v1",
-        format: .openAI,
-        models: ["glm-5.3-abliterated", "glm-5.3-flash-abliterated", "kimi-k3.1-pro",
-                 "deepseek-v4.1-flash-fast", "minimax-m3.1-flash"],
-        selectedModel: "glm-5.3-abliterated"
-    )
+    /// First-run default. No model is preselected: "Test & fetch models" fills the list from `/models`.
+    public static let openAI = Endpoint(name: "OpenAI", baseURL: "https://api.openai.com/v1")
 
     public init(id: UUID = UUID(), name: String, baseURL: String, format: APIFormat = .openAI,
          models: [String] = [], selectedModel: String? = nil, reasoningEffort: String? = nil) {
@@ -44,8 +38,7 @@ public struct Endpoint: Codable, Identifiable, Hashable {
     }
 
     public static let presets: [Endpoint] = [
-        .refuseless,
-        Endpoint(name: "OpenAI", baseURL: "https://api.openai.com/v1"),
+        .openAI,
         Endpoint(name: "Anthropic", baseURL: "https://api.anthropic.com/v1", format: .anthropic),
         Endpoint(name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1"),
         Endpoint(name: "Ollama (local)", baseURL: "http://localhost:11434/v1"),
